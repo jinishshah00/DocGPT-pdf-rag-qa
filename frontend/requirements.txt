@@ -1,0 +1,15 @@
+langchain==0.1.20
+langchain-community==0.0.38
+langchain-openai==0.1.7
+langchain-chroma==0.1.2
+langchain-text-splitters==0.0.1
+openai
+python-dotenv
+PyMuPDF
+chromadb
+tiktoken
+streamlit
+langfuse>=2.0.0
+pandas
+matplotlib
+tavily-python

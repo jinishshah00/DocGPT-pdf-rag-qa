@@ -1,5 +1,3 @@
-# app/self_reflection.py
-
 from typing import Tuple, Optional, cast
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam

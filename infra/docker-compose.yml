@@ -1,0 +1,80 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ragqa}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/backend.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ragqa}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      PERSIST_DIR: /app/chroma_db
+      STORAGE_DIR: /app/storage
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/auth/google/callback}
+      FRONTEND_BASE: ${FRONTEND_BASE:-http://localhost:8501}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      CHROMA_TELEMETRY: "FALSE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      POSTHOG_DISABLED: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - ../backend:/app/backend
+      - backend_storage:/app/storage
+      - backend_chroma:/app/chroma_db
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/frontend.Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      CHROMA_TELEMETRY: "FALSE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      POSTHOG_DISABLED: "1"
+      BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    volumes:
+      - ../frontend:/app/frontend
+      - ../backend:/app/backend
+  pgadmin:
+    image: dpage/pgadmin4:8
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+volumes:
+  pgdata:
+  backend_storage:
+  backend_chroma:
+  pgadmin_data:

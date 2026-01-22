@@ -1,5 +1,37 @@
-import streamlit as st
+import os
+import sys
 import tempfile, uuid
+import warnings
+import logging
+from urllib.parse import quote
+
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+# Env
+os.environ.setdefault("CHROMA_TELEMETRY", "FALSE")
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+os.environ.setdefault("POSTHOG_DISABLED", "1")
+os.environ.setdefault("CHROMA_ENABLE_TELEMETRY", "FALSE")
+
+# Silence telemetry loggers
+logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
+logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.CRITICAL)
+logging.getLogger("posthog").setLevel(logging.CRITICAL)
+
+# Silence legacy LangChain deprecation warnings in logs
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
+
+load_dotenv()
+API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+FRONTEND_BASE = os.getenv("FRONTEND_BASE", "http://localhost:8501")
+
+# Allow frontend to import backend modules (split from app/)
+BACKEND_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+if BACKEND_PATH not in sys.path:
+    sys.path.insert(0, BACKEND_PATH)
+
 from rag_pipeline import RAGPipeline
 from evaluation import custom_self_eval, save_eval_row, save_llm_metrics
 from langfuse_utils import langfuse_trace_span
@@ -21,6 +53,45 @@ session_id = st.session_state["session_id"]
 
 st.set_page_config(page_title="PDF QA")
 st.title("PDF Question Answering")
+
+# Auth
+if "token" not in st.session_state:
+    st.session_state["token"] = None
+
+with st.sidebar:
+    st.subheader("Auth")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button("Register"):
+        r = requests.post(f"{API_BASE}/auth/register", json={"email": email, "password": password})
+        if r.ok:
+            st.session_state["token"] = r.json()["access_token"]
+            st.success("Registered and logged in")
+        else:
+            st.error(r.text)
+    if st.button("Login"):
+        r = requests.post(f"{API_BASE}/auth/login", json={"email": email, "password": password})
+        if r.ok:
+            st.session_state["token"] = r.json()["access_token"]
+            st.success("Logged in")
+        else:
+            st.error(r.text)
+    google_link = f"{API_BASE}/auth/google/start?redirect_to={quote(FRONTEND_BASE)}"
+    st.link_button("Sign in with Google", google_link)
+
+# Handle token returned via callback (Streamlit >= 1.30)
+token_param = st.query_params.get("token")
+if token_param and not st.session_state["token"]:
+    st.session_state["token"] = token_param
+    st.success("Logged in with Google")
+    try:
+        st.query_params.pop("token")
+    except Exception:
+        pass
+
+if not st.session_state["token"]:
+    st.info("Login to continue.")
+    st.stop()
 
 use_compression = st.checkbox("Enable chunk compression (LLM compression)", value=False)
 chain_type = st.selectbox("Choose chain combination type:", ("stuff", "map_reduce", "refine"))
