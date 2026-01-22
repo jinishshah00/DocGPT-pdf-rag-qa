@@ -1,6 +1,37 @@
 .idea
-app/.env
-app/chroma_db
-app/pdfs
-app/eval_results.csv
-app/llm_eval_metrics.csv
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+**/.env
+**/.env.*
+infra/.env
+
+# Python cache/venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/
+
+# Data/artifacts
+**/chroma_db/
+**/storage/
+**/pdfs/
+**/eval_results.csv
+**/llm_eval_metrics.csv
+
+# IDEs
+.vscode/
