@@ -13,7 +13,7 @@ from backend.schemas import (
     FeedbackRequest, EvalRunRequest, EvalRunResponse
 )
 from backend.models import User, Document, ChatSession, Message, Feedback
-from backend.rag_service import ingest_document, create_session, answer_question, clear_session_messages
+from backend.rag_service import ingest_document, create_session, answer_question, clear_session_messages, delete_session
 from backend.analytics_utils import (
     save_eval_row,
     save_llm_metrics_row,
@@ -41,10 +41,10 @@ app.include_router(auth_router)
 app.include_router(google_router)
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db), authorization: str | None = Form(None)):
-    # Accept Authorization via header or form field 'authorization'
+def get_current_user(request: Request, db: Session = Depends(get_db)):
+    # Accept Authorization via header (preferred). Keep compatibility with query param.
     header_auth = request.headers.get("Authorization")
-    bearer = authorization or header_auth
+    bearer = header_auth or request.query_params.get("authorization")
     if not bearer or not bearer.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = bearer.split(" ", 1)[1]
@@ -57,6 +57,11 @@ def get_current_user(request: Request, db: Session = Depends(get_db), authorizat
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+@app.get("/auth/me")
+def auth_me(current_user: User = Depends(get_current_user)):
+    return {"id": current_user.id, "email": current_user.email}
 
 
 @app.post("/docs/upload", response_model=UploadResponse)
@@ -85,10 +90,88 @@ async def create_chat_session(payload: CreateSessionRequest | None = None, reque
                 pass
         doc_id = int(data.get("doc_id")) if data.get("doc_id") is not None else None
         title = data.get("title")
-    if doc_id is None:
-        raise HTTPException(status_code=422, detail="Missing doc_id")
+    # Allow creating sessions without an attached document (doc_id optional)
     sess = create_session(db, current_user.id, doc_id, title)
     return CreateSessionResponse(session_id=sess.id)
+
+
+@app.get("/chat/sessions")
+def list_chat_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.user_id == current_user.id)
+        .order_by(ChatSession.created_at.desc())
+        .all()
+    )
+    return {
+        "sessions": [
+            {
+                "id": s.id,
+                "title": s.title or f"Session {s.id}",
+                "doc_id": s.doc_id,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.post("/chat/{session_id}/attach")
+async def attach_doc_to_session(session_id: int, doc_id: int | None = None, request: Request = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Allow doc_id to be passed via query param, JSON body, or form
+    sess = db.query(ChatSession).get(session_id)
+    if not sess or sess.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # If doc_id wasn't provided as query param, try JSON body or form
+    if doc_id is None and request is not None:
+        try:
+            j = await request.json()
+            print("[attach] json body:", j)
+            if j and j.get("doc_id") is not None:
+                doc_id = int(j.get("doc_id"))
+        except Exception as e:
+            print("[attach] json parse failed:", e)
+            try:
+                form = await request.form()
+                print("[attach] form body:", dict(form))
+                if form and form.get("doc_id") is not None:
+                    doc_id = int(form.get("doc_id"))
+            except Exception as e2:
+                print("[attach] form parse failed:", e2)
+    if doc_id is None:
+        raise HTTPException(status_code=422, detail="Missing doc_id")
+    doc = db.query(Document).get(doc_id)
+    if not doc or doc.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    sess.doc_id = doc.id
+    db.add(sess)
+    db.commit()
+    # Persist an assistant message noting the attachment so frontend can show it
+    try:
+        from backend.models import Message
+
+        note = Message(session_id=sess.id, role="assistant", content=f"File {doc.filename} attached to session.")
+        db.add(note)
+        db.commit()
+    except Exception:
+        pass
+    return {"status": "ok", "session_id": sess.id}
+
+
+@app.get("/chat/{session_id}")
+def get_chat_session(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sess = db.query(ChatSession).get(session_id)
+    if not sess or sess.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    doc = None
+    if sess.doc_id:
+        d = db.query(Document).get(sess.doc_id)
+        if d:
+            doc = {"id": d.id, "filename": d.filename}
+    messages = []
+    for m in db.query(Message).filter(Message.session_id == sess.id).order_by(Message.created_at.asc()).all():
+        messages.append({"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at.isoformat() if m.created_at else None})
+    return {"id": sess.id, "title": sess.title, "doc": doc, "messages": messages}
 
 
 @app.post("/chat/{session_id}/message", response_model=ChatMessageResponse)
@@ -124,7 +207,19 @@ async def send_message(session_id: int, payload: ChatMessageRequest | None = Non
             pass
     if not content:
         raise HTTPException(status_code=422, detail="Missing content")
-    msg, sources, latency_ms = answer_question(db, session_id, content, chain_type, use_compression)
+    # Persist the user's message so it appears when loading the session
+    try:
+        user_msg = Message(session_id=session_id, role="user", content=content)
+        db.add(user_msg)
+        db.commit()
+    except Exception:
+        # If persisting user message fails, continue to attempt answering
+        pass
+    try:
+        msg, sources, latency_ms = answer_question(db, session_id, content, chain_type, use_compression)
+    except ValueError as e:
+        # Treat missing document or session as a client error
+        raise HTTPException(status_code=422, detail=str(e))
     result = {
         "result": msg.content,
         "sources": sources,
@@ -147,6 +242,14 @@ def clear_messages(session_id: int, current_user: User = Depends(get_current_use
         raise HTTPException(status_code=404, detail="Session not found")
     deleted = clear_session_messages(db, session_id)
     return {"deleted": deleted}
+
+
+@app.delete("/chat/{session_id}")
+def delete_chat_session(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    success = delete_session(db, session_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"success": True}
 
 
 @app.post("/feedback")

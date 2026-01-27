@@ -13,3 +13,4 @@ langfuse>=2.0.0
 pandas
 matplotlib
 tavily-python
+streamlit-cookies-manager==0.2.0

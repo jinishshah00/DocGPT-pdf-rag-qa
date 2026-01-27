@@ -73,23 +73,24 @@ class RAGPipeline:
     @staticmethod
     def _ensure_chroma_schema(persist_dir: str) -> None:
         """Reset broken/empty chroma sqlite db to avoid 'no such table: collections'."""
+        os.makedirs(persist_dir, exist_ok=True)
         db_path = os.path.join(persist_dir, "chroma.sqlite3")
         if not os.path.exists(db_path):
             return
         try:
             conn = sqlite3.connect(db_path)
-            cur = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='collections'"
-            )
-            has_table = cur.fetchone() is not None
+            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {row[0] for row in cur.fetchall()}
+            required = {"collections", "tenants", "databases"}
+            has_required = required.issubset(tables)
         except Exception:
-            has_table = False
+            has_required = False
         finally:
             try:
                 conn.close()
             except Exception:
                 pass
-        if not has_table:
+        if not has_required:
             for suffix in ("", "-wal", "-shm"):
                 try:
                     os.remove(db_path + suffix)
@@ -110,7 +111,21 @@ class RAGPipeline:
         for c in chunks:
             c.metadata["source"] = orig_filename if orig_filename else pdf_path
 
-        self.db.add_documents(chunks)
+        try:
+            self.db.add_documents(chunks)
+        except Exception as e:
+            msg = str(e)
+            if "no such table" in msg or "collection" in msg or "tenant" in msg:
+                # Recreate schema and retry once
+                self._ensure_chroma_schema(PERSIST_DIR)
+                self.db = Chroma(
+                    embedding_function=self.embedding,
+                    persist_directory=PERSIST_DIR,
+                    client_settings=Settings(anonymized_telemetry=False),
+                )
+                self.db.add_documents(chunks)
+            else:
+                raise
         return len(chunks)
 
     def ask(self, query):
