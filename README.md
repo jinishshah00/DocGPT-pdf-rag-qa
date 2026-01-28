@@ -90,7 +90,7 @@ Key capabilities:
 
 ---
 
-## Expanded Feature Summary
+## Feature Summary
 
 - Document ingestion: upload PDFs, split into chunks, and index into local Chroma (persisted in Docker volume). Metadata (filename, source) is stored with chunks.
 - Retrieval strategies: `stuff` (concat), `map_reduce` (map per chunk + reduce), `refine` (iterative refinement). These are exposed to the user as `Chain type` options.
@@ -99,36 +99,6 @@ Key capabilities:
 - Sessions: authenticated users get persistent chat sessions (stored in Postgres, viewable via `Your chats`); anonymous users get a full-featured local session that resets on refresh.
 - Tracing & observability: Langfuse integration captures prompts, token usage, latency, and retrieval decisions for debugging and analysis.
 - Analytics: endpoints to capture evaluation rows and LLM metric reports; built-in CSV export/ dashboards in the frontend.
-
----
-
-## High-level architecture & system diagram
-
-The system has three primary runtime components: the Streamlit frontend (user UI), the FastAPI backend (persistence, orchestration), and the vector/LLM infrastructure (Chroma + OpenAI). Additional integrations: Tavily for web search, Langfuse for tracing, PgAdmin for DB inspection.
-
-Mermaid diagram (high-level):
-
-```mermaid
-flowchart LR
-  User[User Browser] --> Frontend[Streamlit Frontend]
-  Frontend --> Uploader[Uploader]
-  Frontend --> Composer[Composer]
-  Uploader --> Backend[FastAPI Backend]
-  Composer --> Backend
-  Backend --> Chroma[Chroma DB]
-  Backend --> OpenAI[OpenAI API]
-  Backend --> Tools[Tavily]
-  Backend --> Sessions[Postgres Sessions]
-  Sessions --> PgAdmin[PgAdmin]
-  Frontend --> Langfuse[Langfuse]
-```
-
-The flow:
-- Users interact with the Streamlit frontend to upload PDFs, configure options, and ask questions.
-- The frontend either calls the backend (authenticated/persisted flows) or uses a local pipeline (anonymous/local-only flow).
-- The backend's RAG service loads/creates pipelines, indexes documents into Chroma, retrieves relevant chunks, and invokes LLMs to generate answers.
-- ReAct agent flows call `RAGSearch` (pipeline) and external web search (Tavily) as tools.
-- Langfuse traces are emitted from frontend/backend/RAG layers to capture prompts, token usage, and latency.
 
 ---
 
