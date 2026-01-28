@@ -939,11 +939,23 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
+    # Place the anonymous warning below the sign-in area (only shown when not logged in)
+    if not st.session_state.get("token"):
+        st.markdown(
+            """
+            <br>
+            <div style="margin:8px 0; font-size:13px; color:var(--form-text-color);">
+                ⚠️  You are using DocGPT anonymously <br> ⚠️  Your session won’t be saved.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 if not st.session_state["token"]:
-    st.info("Login to continue.")
-    st.stop()
+    # Intentionally do not block anonymous users; show a short note in the sidebar instead.
+    pass
 
 # Main body panel switcher — panels are shown without close buttons; use sidebar tabs to switch
 if st.session_state["active_panel"]:
@@ -983,22 +995,24 @@ with st.form("composer_form", clear_on_submit=True):
             except Exception:
                 tmp_path = None
         # Persist document to backend and attach to active session if present
-        try:
-            headers = {"Authorization": f"Bearer {st.session_state['token']}"}
-            with open(tmp_path, "rb") as fh:
-                r = requests.post(f"{API_BASE_INTERNAL}/docs/upload", headers=headers, files={"file": (uploaded_file.name, fh, "application/pdf")})
-            if r.ok:
-                doc_info = r.json()
-                doc_id = doc_info.get("doc_id")
-                # Attach to active session if present
-                sid = st.session_state.get("active_session_id")
-                if sid and doc_id:
-                    try:
-                        a = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/attach", headers=headers, json={"doc_id": doc_id})
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        # If user is logged in, persist document to backend and attach to active session
+        if st.session_state.get("token"):
+            try:
+                headers = {"Authorization": f"Bearer {st.session_state['token']}"}
+                with open(tmp_path, "rb") as fh:
+                    r = requests.post(f"{API_BASE_INTERNAL}/docs/upload", headers=headers, files={"file": (uploaded_file.name, fh, "application/pdf")})
+                if r.ok:
+                    doc_info = r.json()
+                    doc_id = doc_info.get("doc_id")
+                    # Attach to active session if present
+                    sid = st.session_state.get("active_session_id")
+                    if sid and doc_id:
+                        try:
+                            a = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/attach", headers=headers, json={"doc_id": doc_id})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         shown_uploads = st.session_state.setdefault("upload_notice_shown", set())
         if uploaded_file.name not in shown_uploads:
             st.session_state["messages"].append(
@@ -1144,8 +1158,8 @@ if send_clicked and prompt:
     else:
         # Use backend to persist and answer the question for the active session
         sid = st.session_state.get("active_session_id")
-        if not sid:
-            # create a session as fallback
+        if not sid and st.session_state.get("token"):
+            # create a session on backend for logged-in users
             try:
                 headers = {"Authorization": f"Bearer {st.session_state['token']}"}
                 r = requests.post(f"{API_BASE_INTERNAL}/chat/session", headers=headers)
@@ -1155,7 +1169,9 @@ if send_clicked and prompt:
                     st.session_state["active_session_is_new"] = True
             except Exception:
                 sid = None
-        if sid:
+
+        if sid and st.session_state.get("token"):
+            # Persisted backend flow for logged-in users
             try:
                 headers = {"Authorization": f"Bearer {st.session_state['token']}"}
                 payload = {"content": prompt, "chain_type": chain_type, "use_compression": use_compression}
@@ -1167,8 +1183,10 @@ if send_clicked and prompt:
                     st.session_state["messages"].append({"role": "assistant", "content": ans, "sources": sources})
                     # Mark session as used
                     st.session_state["active_session_is_new"] = False
+                else:
+                    # If backend call fails, fallback to local pipeline
+                    raise Exception("backend call failed")
             except Exception:
-                # Fallback to local pipeline if backend fails
                 pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
                 base_response = pipeline.ask(prompt)
                 answer_text = (
@@ -1184,6 +1202,23 @@ if send_clicked and prompt:
                         "snippet": doc_obj.page_content[:200].replace(chr(10), " "),
                     })
                 st.session_state["messages"].append({"role": "assistant", "content": answer_text, "sources": sources})
+        else:
+            # Anonymous/local-only flow: keep messages in session_state only
+            pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
+            base_response = pipeline.ask(prompt)
+            answer_text = (
+                base_response.get("answer")
+                or base_response.get("result")
+                or base_response.get("output")
+                or ""
+            )
+            sources = []
+            for doc_obj in base_response.get("source_documents", []) or []:
+                sources.append({
+                    "source": doc_obj.metadata.get("source", "?"),
+                    "snippet": doc_obj.page_content[:200].replace(chr(10), " "),
+                })
+            st.session_state["messages"].append({"role": "assistant", "content": answer_text, "sources": sources})
 
     st.rerun()
 
