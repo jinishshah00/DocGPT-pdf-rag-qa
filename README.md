@@ -216,10 +216,4 @@ LANGFUSE_SECRET_KEY=...
 
 ---
 
-If you'd like, I can also:
-- Add an `.env.example` file to the repo.
-- Add a `dev.sh` script to simplify `docker compose up --build` and environment checks.
-- Generate a simple sequence diagram (Mermaid) for agent flows (RAG -> Tavily -> LLM).
-
-Would you like me to add the `.env.example` and `dev.sh` now?
 
