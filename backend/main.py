@@ -64,6 +64,17 @@ def auth_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "email": current_user.email}
 
 
+@app.get("/user/usage")
+def user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the number of user questions used and remaining quota."""
+    try:
+        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+    except Exception:
+        used = 0
+    LIMIT = 15
+    return {"used": used, "limit": LIMIT, "remaining": max(0, LIMIT - used)}
+
+
 @app.post("/docs/upload", response_model=UploadResponse)
 async def upload_doc(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     content = await file.read()
@@ -207,6 +218,15 @@ async def send_message(session_id: int, payload: ChatMessageRequest | None = Non
             pass
     if not content:
         raise HTTPException(status_code=422, detail="Missing content")
+    # Enforce per-user message cap (15 questions total across all sessions)
+    try:
+        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+    except Exception:
+        used = 0
+    LIMIT = 15
+    if used >= LIMIT:
+        raise HTTPException(status_code=403, detail=f"Message limit reached ({used}/{LIMIT}). Upgrade or wait to continue.")
+
     # Persist the user's message so it appears when loading the session
     try:
         user_msg = Message(session_id=session_id, role="user", content=content)
@@ -374,6 +394,15 @@ async def agent_invoke_session(session_id: int, query: str = Form(None), request
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Enforce per-user message cap (15 questions total across all sessions)
+    try:
+        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+    except Exception:
+        used = 0
+    LIMIT = 15
+    if used >= LIMIT:
+        raise HTTPException(status_code=403, detail=f"Message limit reached ({used}/{LIMIT}). Upgrade or wait to continue.")
+
     # Persist user query
     from backend.models import Message
     user_msg = Message(session_id=session_id, role="user", content=query)

@@ -1,0 +1,25 @@
+# fly backend template - copy to backend/ and run `flyctl launch` there or use `--config`
+app = "docgpt-backend"
+
+[build]
+  # Build using the Dockerfile in infra/
+  # dockerfile path is relative to this config file; use ../infra when deploying from repo root
+  dockerfile = "../infra/backend.Dockerfile"
+  context = ".."
+
+[env]
+  # Set any build-time environment variables here if needed
+  PYTHONUNBUFFERED = "1"
+
+[[services]]
+  internal_port = 8000
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+  [[mounts]]
+    source = "chroma_volume"
+    destination = "/app/chroma_db"

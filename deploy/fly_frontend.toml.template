@@ -1,0 +1,21 @@
+# fly frontend template - copy to frontend/ and run `flyctl launch` there or use `--config`
+app = "docgpt-frontend"
+
+[build]
+  # Build using the Dockerfile in infra/
+  # dockerfile path is relative to this config file; use ../infra when deploying from repo root
+  dockerfile = "../infra/frontend.Dockerfile"
+  context = ".."
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[[services]]
+  internal_port = 8501
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
