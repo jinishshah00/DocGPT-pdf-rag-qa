@@ -63,12 +63,19 @@ class RAGPipeline:
 
         self.chat_history = []
         self.chain_type = chain_type
-        self.qa = ConversationalRetrievalChain.from_llm(
-            llm=self.llm,
-            retriever=self.retriever,
-            return_source_documents=True,
-            chain_type=chain_type
-        )
+        if chain_type == "map_reduce":
+            self.qa = ConversationalRetrievalChain.from_llm(
+                llm=self.llm,
+                retriever=self.retriever,
+                return_source_documents=True,
+            )
+        else:
+            self.qa = ConversationalRetrievalChain.from_llm(
+                llm=self.llm,
+                retriever=self.retriever,
+                return_source_documents=True,
+                chain_type=chain_type
+            )
 
     @staticmethod
     def _ensure_chroma_schema(persist_dir: str) -> None:

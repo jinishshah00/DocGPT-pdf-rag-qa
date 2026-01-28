@@ -65,16 +65,16 @@ st.markdown(
     <style>
     /* Sidebar styling to match form */
     [data-testid="stSidebar"] {
-        background-color: var(--form-background) !important;
+        background-color: var(--form-dropzone-bg) !important;
     }
     [data-testid="stSidebarContent"] {
-        background-color: var(--form-background) !important;
+        background-color: var(--form-dropzone-bg) !important;
     }
     [data-testid="stSidebarHeader"] {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        background-color: var(--form-background) !important;
+        background-color: var(--form-dropzone-bg) !important;
         padding-top: 20px !important;
         color: var(--form-text-color) !important;
     }
@@ -94,7 +94,7 @@ st.markdown(
         flex-direction: column;
         height: 100vh;
         padding-bottom: 12px;
-        background-color: var(--form-background) !important;
+        background-color: var(--form-dropzone-bg) !important;
     }
     /* Hide stale duplicates only when a fresh copy exists in the same container */
     [data-testid="stElementContainer"]:has([data-stale="true"]):has([data-stale="false"]) [data-stale="true"] {
@@ -649,7 +649,7 @@ with st.sidebar:
             position: relative !important;
         }
         [data-testid="stSidebar"] [data-testid="stVerticalBlock"]:has(.chat-section) [data-testid="stVerticalBlock"] .stButton > button:hover {
-            background: var(--form-dropzone-bg) !important;
+            background: var(--form-border-color) !important;
         }
         /* Session item container with delete button */
         .session-item {
@@ -663,7 +663,7 @@ with st.sidebar:
             transition: background 0.2s;
         }
         .session-item:hover {
-            background: var(--form-dropzone-bg) !important;
+            background: var(--form-border-color) !important;
         }
         .session-title {
             flex: 1;
@@ -787,6 +787,12 @@ with st.sidebar:
             -webkit-overflow-scrolling: touch !important;
             padding-right: 4px !important;
         }
+        /* Hover state for chat session buttons and sidebar action buttons */
+        [data-testid="stSidebar"] .stButton > button:hover,
+        [data-testid="stSidebar"] .stButton > button:focus {
+            background: var(--form-border-color) !important;
+            color: var(--form-text-color) !important;
+        }
 
         /* Ensure parent sidebar blocks do not clip or become scroll containers */
         [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
@@ -794,12 +800,15 @@ with st.sidebar:
         }
 
         /* Also target the specific sidebar wrapper observed in DevTools and limit its height */
-        [data-testid="stSidebar"] div.st-emotion-cache-18kf3ut,
-        div.st-emotion-cache-18kf3ut {
+        [data-testid="stSidebar"] div.st-emotion-cache-18kf3ut {
             max-height: 40vh !important;
             overflow-y: auto !important;
             overflow-x: hidden !important;
             -webkit-overflow-scrolling: touch !important;
+        }
+        /* Remove global application of max-height */
+        div.st-emotion-cache-18kf3ut {
+            max-height: unset !important;
         }
         </style>
         """,
@@ -999,7 +1008,7 @@ with st.form("composer_form", clear_on_submit=True):
 
     input_cols = st.columns([0.92, 0.08])
     with input_cols[0]:
-        prompt_text = st.text_area("Message DocGPT", key="composer_text", label_visibility="collapsed", height=60)
+        prompt_text = st.text_area("Message DocGPT", key="composer_text", label_visibility="collapsed", height=60, placeholder="Ask anything")
     with input_cols[1]:
         send_clicked = st.form_submit_button("➤")
 
@@ -1007,10 +1016,24 @@ with st.form("composer_form", clear_on_submit=True):
     opt1, opt2, opt3, opt4 = st.columns([1, 1, 1.4, 1.6])
     with opt1:
         st.markdown("<div class='composer-label'>Chain type</div>", unsafe_allow_html=True)
-        chain_type = st.selectbox("Chain type", ("stuff", "map_reduce", "refine"), index=0, label_visibility="collapsed")
+        chain_type = st.selectbox(
+            "Chain type",
+            ("stuff", "map_reduce", "refine"),
+            index=0,
+            label_visibility="collapsed",
+            key="chain_type_dropdown",
+            kwargs={"dropUp": True}  # Force dropdown to open upwards
+        )
     with opt2:
         st.markdown("<div class='composer-label'>Mode</div>", unsafe_allow_html=True)
-        mode = st.selectbox("Mode", ("RAG", "ReAct Agent"), index=0, label_visibility="collapsed")
+        mode = st.selectbox(
+            "Mode",
+            ("RAG", "ReAct Agent"),
+            index=0,
+            label_visibility="collapsed",
+            key="mode_dropdown",
+            kwargs={"dropUp": True}  # Force dropdown to open upwards
+        )
     with opt3:
         st.markdown("<div class='composer-label'>Enable Chunk Compression</div>", unsafe_allow_html=True)
         use_compression = st.checkbox("Enable chunk compression", value=False, label_visibility="collapsed")
