@@ -29,45 +29,53 @@ DocGPT is a small product-style Retrieval-Augmented Generation (RAG) application
 
 ## Tech stack
 
-- Python 3.11
-- Streamlit (frontend)
-- FastAPI + Uvicorn (backend)
-- PostgreSQL (persistent DB)
-- Chroma (vector store)
-- LangChain (chains, retrievers)
-- OpenAI (LLMs) via `langchain-openai`
-- Docker + docker-compose for local deployment
+```mermaid
+flowchart LR
+	subgraph USER
+		U[User Browser]
+	end
 
-Key Python dependency versions (as used in repo):
-- `langchain==0.1.20`
-- `langchain-openai==0.1.7`
-- `langchain-chroma==0.1.2`
-- `streamlit` (see `frontend/requirements.txt`)
+	subgraph FRONTEND
+		FUI["Streamlit UI"]
+		FUP["Uploader"]
+		FCOM["Composer - chain, compression, ReAct"]
+	end
 
----
+	subgraph BACKEND
+		API["FastAPI REST API"]
+		SESS["Chat Sessions (Postgres)"]
+		DOCS["Documents & Storage"]
+		RAG["RAG Service & Pipeline"]
+	end
 
-## Important files
+	subgraph CHROMA
+		CH["Chroma (vector store)"]
+	end
 
-- `frontend/app.py` — Streamlit UI and client logic.
-- `backend/main.py` — FastAPI app and endpoints.
-- `backend/rag_pipeline.py` — RAG pipeline: Chroma client initialization, text splitting, embedding, retriever, and ConversationalRetrievalChain wiring.
-- `backend/rag_service.py` — Orchestration glue calling the pipeline and persisting messages.
-- `backend/rag_tools.py` — Tools exposed to ReAct agents (safe error handling included).
-- `infra/docker-compose.yml` — Docker Compose stack (Postgres, backend, frontend, pgadmin).
-- `backend/requirements.txt`, `frontend/requirements.txt` — Python dependencies.
+	subgraph LLMS
+		OPEN["OpenAI API"]
+	end
 
----
+	subgraph TOOLS
+		TAV["Tavily Web Search"]
+		LF["Langfuse Tracing"]
+		PG["PgAdmin"]
+	end
 
-## Environment variables
-
-Set these before running (or provide via an `.env` file):
-
-- `OPENAI_API_KEY` — OpenAI API key for LLMs.
-- `POSTGRES_USER` (default: `postgres`)
-- `POSTGRES_PASSWORD` (default: `postgres`)
-- `POSTGRES_DB` (default: `ragqa`)
-# DocGPT (RAG PDF QA)
-
+	U --> FUI
+	FUI --> FUP
+	FUI --> FCOM
+	FUP --> API
+	FCOM --> API
+	API --> RAG
+	RAG --> CH
+	RAG --> OPEN
+	RAG --> TAV
+	API --> SESS
+	SESS --> PG
+	API --> LF
+	FUI --> LF
+```
 DocGPT is a production-oriented Retrieval-Augmented Generation (RAG) system focused on answering questions over PDF documents with citations, quality checks, optional web search, and developer-focused observability. It combines a Streamlit frontend UI with a FastAPI backend, persistent Postgres storage for authenticated users, and Chroma as the vector store for semantic retrieval. The system is designed for both interactive demos (Streamlit) and programmatic use via API.
 
 Key capabilities:
