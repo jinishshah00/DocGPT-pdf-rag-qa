@@ -43,14 +43,9 @@ class RAGPipeline:
     def __init__(self, use_compression=False, chain_type="stuff"):
         self.embedding = OpenAIEmbeddings()
         self.llm = ChatOpenAI(model="gpt-3.5-turbo")
+        # Initialize Chroma and retriever via helper so we can recreate on schema errors
         self._ensure_chroma_schema(PERSIST_DIR)
-        client_settings = Settings(anonymized_telemetry=False)
-        self.db = Chroma(
-            embedding_function=self.embedding,
-            persist_directory=PERSIST_DIR,
-            client_settings=client_settings,
-        )
-        self.base_retriever = self.db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "score_threshold": 0.7})
+        self._init_chroma_client()
 
         if use_compression:
             compressor = LLMChainExtractor.from_llm(self.llm)
@@ -76,6 +71,31 @@ class RAGPipeline:
                 return_source_documents=True,
                 chain_type=chain_type
             )
+
+    def _init_chroma_client(self):
+        """Initialize or reinitialize the Chroma client and retriever."""
+        client_settings = Settings(anonymized_telemetry=False)
+        self.db = Chroma(
+            embedding_function=self.embedding,
+            persist_directory=PERSIST_DIR,
+            client_settings=client_settings,
+        )
+        self.base_retriever = self.db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "score_threshold": 0.7})
+
+        # Wrap base retriever with compression if requested earlier
+        # Note: when reinitializing we keep the same retriever type as before
+        try:
+            # If self.retriever exists and was a compression retriever, preserve that
+            if isinstance(getattr(self, "retriever", None), ContextualCompressionRetriever):
+                self.retriever = ContextualCompressionRetriever(
+                    base_compressor=LLMChainExtractor.from_llm(self.llm),
+                    base_retriever=self.base_retriever,
+                )
+            else:
+                self.retriever = self.base_retriever
+        except Exception:
+            # Fallback: use base retriever
+            self.retriever = self.base_retriever
 
     @staticmethod
     def _ensure_chroma_schema(persist_dir: str) -> None:
@@ -125,20 +145,40 @@ class RAGPipeline:
             if "no such table" in msg or "collection" in msg or "tenant" in msg:
                 # Recreate schema and retry once
                 self._ensure_chroma_schema(PERSIST_DIR)
-                self.db = Chroma(
-                    embedding_function=self.embedding,
-                    persist_directory=PERSIST_DIR,
-                    client_settings=Settings(anonymized_telemetry=False),
-                )
+                # Reinitialize client and retriever then retry
+                self._init_chroma_client()
                 self.db.add_documents(chunks)
             else:
                 raise
         return len(chunks)
 
     def ask(self, query):
-        response = self.qa.invoke({
-            "question": query,
-            "chat_history": self.chat_history
-        })
-        self.chat_history.append((query, response["answer"]))
+        # Try invoking QA chain; on DB schema errors, attempt to recreate Chroma and retry once
+        try:
+            response = self.qa.invoke({"question": query, "chat_history": self.chat_history})
+        except Exception as e:
+            msg = str(e)
+            if "no such table" in msg or "collection" in msg or "tenant" in msg:
+                # Recreate schema and reinitialize client/retriever and QA chain
+                try:
+                    self._ensure_chroma_schema(PERSIST_DIR)
+                    self._init_chroma_client()
+                    # Rebuild QA chain with same chain_type
+                    self.qa = ConversationalRetrievalChain.from_llm(
+                        llm=self.llm,
+                        retriever=self.retriever,
+                        return_source_documents=True,
+                        chain_type=self.chain_type,
+                    )
+                    response = self.qa.invoke({"question": query, "chat_history": self.chat_history})
+                except Exception:
+                    raise
+            else:
+                raise
+
+        # Append to history if answer present
+        try:
+            self.chat_history.append((query, response.get("answer") or response.get("result") or ""))
+        except Exception:
+            pass
         return response

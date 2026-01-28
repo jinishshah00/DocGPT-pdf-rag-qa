@@ -66,9 +66,13 @@ st.markdown(
     /* Sidebar styling to match form */
     [data-testid="stSidebar"] {
         background-color: var(--form-dropzone-bg) !important;
+        height: 100vh !important;
+        overflow: hidden !important;
     }
     [data-testid="stSidebarContent"] {
         background-color: var(--form-dropzone-bg) !important;
+        height: 100vh !important;
+        overflow: hidden !important;
     }
     [data-testid="stSidebarHeader"] {
         display: flex;
@@ -1041,40 +1045,79 @@ with st.form("composer_form", clear_on_submit=True):
         st.markdown("<div class='composer-label'>Enable Self-reflection</div>", unsafe_allow_html=True)
         enable_reflection = st.checkbox("Enable self-reflection", value=True, label_visibility="collapsed")
 
-chat_container = st.container()
-with chat_container:
-    st.markdown("<div class='chat-scroll'>", unsafe_allow_html=True)
-    for msg in st.session_state["messages"]:
-        role = msg.get("role", "assistant")
-        with st.chat_message(role):
-            content = msg.get("content", "")
-            if msg.get("kind") == "upload_notice":
-                st.markdown(
-                    f"<div style='color:#1a7f37; font-weight:600;'>{html.escape(content)}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(content)
-            sources = msg.get("sources") or []
-            if sources:
-                with st.expander("Sources"):
-                    for s in sources:
-                        st.markdown(f"- **{s.get('source', '?')}**: {s.get('snippet', '')}")
-    st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-    components.html(
+# Show intro screen when there are no messages yet (new chat)
+if not st.session_state.get("messages"):
+    st.markdown(
         """
-        <script>
-        const root = window.parent.document;
-        const bottom = root.getElementById('chat-bottom');
-        if (bottom) {
-          setTimeout(() => { bottom.scrollIntoView({behavior: 'auto', block: 'end'}); }, 50);
-        }
-        </script>
+        <style>
+          .hero { padding: 1.25rem 1.25rem; border-radius: 18px; border: 1px solid rgba(255,255,255,0.12); background: linear-gradient(135deg, rgba(99,102,241,0.18), rgba(16,185,129,0.14)); }
+          .tag { display: inline-block; padding: 0.25rem 0.6rem; margin-right: 0.4rem; border-radius: 999px; font-size: 0.85rem; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.05); }
+          .card { padding: 1.05rem 1.05rem; border-radius: 16px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.03); height: 100%; }
+          .muted { opacity: 0.85; }
+          .small { font-size: 0.92rem; }
+          .divider { margin: 0.75rem 0; border-bottom: 1px solid rgba(255,255,255,0.10); }
+          .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.85rem; padding: 0.15rem 0.45rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.06); }
+        </style>
+
+        <div class="hero">
+          <h1 style="margin:0;">🤖📄 Welcome to <span style="letter-spacing:0.2px;">DocGPT</span></h1>
+          <p class="muted" style="margin:0.35rem 0 0;">Ask questions to your PDFs with citations, quality checks, and optional web search. Built to feel like a product, not a one-off chatbot.</p>
+          <div style="margin-top:0.8rem;">
+            <span class="tag">RAG + Citations</span>
+            <span class="tag">Self-Reflection</span>
+            <span class="tag">Chunk Compression</span>
+            <span class="tag">Stuff / Map-Reduce / Refine</span>
+            <span class="tag">ReAct + Web Search</span>
+            <span class="tag">Analytics</span>
+          </div>
+        </div>
+
+        <br />
+
+        <div class="card">
+          <h3 style="margin-top:0;">🚀 Quick Start (60 seconds)</h3>
+          <p class="muted small">1) Upload a PDF → the app splits it into chunks and builds semantic search.<br>2) Ask a question → DocGPT retrieves the best chunks and answers with sources.<br>3) Tune settings → use Compression / Chain types / ReAct based on your document and question.</p>
+          <div class="divider"></div>
+          <p class="small"><b>Tip:</b> Start with <b>Compression OFF</b>, <b>Chain = Stuff</b>, <b>Self-Reflection ON</b>.</p>
+        </div>
         """,
-        height=0,
-        width=0,
+        unsafe_allow_html=True,
     )
+else:
+    chat_container = st.container()
+    with chat_container:
+        st.markdown("<div class='chat-scroll'>", unsafe_allow_html=True)
+        for msg in st.session_state["messages"]:
+            role = msg.get("role", "assistant")
+            with st.chat_message(role):
+                content = msg.get("content", "")
+                if msg.get("kind") == "upload_notice":
+                    st.markdown(
+                        f"<div style='color:#1a7f37; font-weight:600;'>{html.escape(content)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(content)
+                sources = msg.get("sources") or []
+                if sources:
+                    with st.expander("Sources"):
+                        for s in sources:
+                            st.markdown(f"- **{s.get('source', '?')}**: {s.get('snippet', '')}")
+        st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        components.html(
+            """
+            <script>
+            const root = window.parent.document;
+            const bottom = root.getElementById('chat-bottom');
+            if (bottom) {
+              setTimeout(() => { bottom.scrollIntoView({behavior: 'auto', block: 'end'}); }, 50);
+            }
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
 
 prompt = (prompt_text or "").strip()
 if send_clicked and prompt:
