@@ -7,6 +7,9 @@ PERSIST_DIR = os.getenv("PERSIST_DIR", "./chroma_db")
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+# Normalize legacy Heroku-style scheme
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+	DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # Auth
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
