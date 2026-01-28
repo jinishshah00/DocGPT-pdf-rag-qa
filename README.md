@@ -110,53 +110,17 @@ Mermaid diagram (high-level):
 
 ```mermaid
 flowchart LR
-	subgraph User
-		U[User Browser]
-	end
-
-	subgraph Frontend [Streamlit Frontend]
-		FUI[UI Components]
-		FUpload[Uploader]
-		FComposer[Composer (chain type, compression, ReAct)]
-	end
-
-	subgraph Backend [FastAPI Backend]
-		API[REST API]
-		Sessions[Chat Sessions (Postgres)]
-		Docs[Documents & Storage]
-		RAGSrv[RAG Service & Pipeline]
-	end
-
-	subgraph VectorStore [Chroma (persisted volume)]
-		ChromaDB[(chroma.sqlite3)]
-	end
-
-	subgraph LLMs[LLM Providers]
-		OpenAI[OpenAI API]
-	end
-
-	subgraph Tools
-		Tavily[Tavily Web Search]
-		Langfuse[Langfuse Tracing]
-		PgAdmin[PgAdmin]
-	end
-
-	U --> FUI
-	FUI --> FUpload
-	FUI --> FComposer
-	FUpload --> API
-	FComposer --> API
-	API --> RAGSrv
-	RAGSrv --> ChromaDB
-	RAGSrv --> OpenAI
-	RAGSrv --> Tavily
-	API --> Sessions
-	Sessions --> PgAdmin
-	API --> Langfuse
-	FUI --> Langfuse
-
-	classDef infra fill:#f9f,stroke:#333,stroke-width:1px;
-	class VectorStore,LTM,OpenAI infra;
+  User[User Browser] --> Frontend[Streamlit Frontend]
+  Frontend --> Uploader[Uploader]
+  Frontend --> Composer[Composer]
+  Uploader --> Backend[FastAPI Backend]
+  Composer --> Backend
+  Backend --> Chroma[Chroma DB]
+  Backend --> OpenAI[OpenAI API]
+  Backend --> Tools[Tavily]
+  Backend --> Sessions[Postgres Sessions]
+  Sessions --> PgAdmin[PgAdmin]
+  Frontend --> Langfuse[Langfuse]
 ```
 
 The flow:
