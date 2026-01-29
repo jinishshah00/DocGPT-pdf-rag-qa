@@ -59,6 +59,38 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
     return user
 
 
+def get_optional_user(request: Request, db: Session = Depends(get_db)):
+    """Return authenticated user when present, otherwise return (or create) a guest user.
+    This allows the frontend to call chat endpoints without a logged-in user for demo purposes.
+    """
+    header_auth = request.headers.get("Authorization")
+    bearer = header_auth or request.query_params.get("authorization")
+    if bearer and bearer.startswith("Bearer "):
+        token = bearer.split(" ", 1)[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = int(payload.get("sub"))
+            user = db.query(User).get(user_id)
+            if user:
+                return user
+        except Exception:
+            # fall through to guest behavior
+            pass
+    # Create or return a shared guest user
+    guest_email = "guest@docgpt.local"
+    guest = db.query(User).filter(User.email == guest_email).first()
+    if not guest:
+        try:
+            guest = User(email=guest_email, password_hash="")
+            db.add(guest)
+            db.commit()
+            db.refresh(guest)
+        except Exception:
+            db.rollback()
+            guest = db.query(User).filter(User.email == guest_email).first()
+    return guest
+
+
 @app.get("/auth/me")
 def auth_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "email": current_user.email}
@@ -83,7 +115,7 @@ async def upload_doc(file: UploadFile = File(...), current_user: User = Depends(
 
 
 @app.post("/chat/session", response_model=CreateSessionResponse)
-async def create_chat_session(payload: CreateSessionRequest | None = None, request: Request = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def create_chat_session(payload: CreateSessionRequest | None = None, request: Request = None, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     doc_id = None
     title = None
     if payload is not None:
@@ -107,7 +139,7 @@ async def create_chat_session(payload: CreateSessionRequest | None = None, reque
 
 
 @app.get("/chat/sessions")
-def list_chat_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_chat_sessions(current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     sessions = (
         db.query(ChatSession)
         .filter(ChatSession.user_id == current_user.id)
@@ -128,7 +160,7 @@ def list_chat_sessions(current_user: User = Depends(get_current_user), db: Sessi
 
 
 @app.post("/chat/{session_id}/attach")
-async def attach_doc_to_session(session_id: int, doc_id: int | None = None, request: Request = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def attach_doc_to_session(session_id: int, doc_id: int | None = None, request: Request = None, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     # Allow doc_id to be passed via query param, JSON body, or form
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
@@ -170,7 +202,7 @@ async def attach_doc_to_session(session_id: int, doc_id: int | None = None, requ
 
 
 @app.get("/chat/{session_id}")
-def get_chat_session(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_chat_session(session_id: int, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -186,7 +218,7 @@ def get_chat_session(session_id: int, current_user: User = Depends(get_current_u
 
 
 @app.post("/chat/{session_id}/message", response_model=ChatMessageResponse)
-async def send_message(session_id: int, payload: ChatMessageRequest | None = None, request: Request = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def send_message(session_id: int, payload: ChatMessageRequest | None = None, request: Request = None, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -256,7 +288,7 @@ async def send_message(session_id: int, payload: ChatMessageRequest | None = Non
 
 
 @app.delete("/chat/{session_id}/messages")
-def clear_messages(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def clear_messages(session_id: int, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -265,7 +297,7 @@ def clear_messages(session_id: int, current_user: User = Depends(get_current_use
 
 
 @app.delete("/chat/{session_id}")
-def delete_chat_session(session_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_chat_session(session_id: int, current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     success = delete_session(db, session_id, current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
