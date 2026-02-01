@@ -97,7 +97,7 @@ def auth_me(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/user/usage")
-def user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def user_usage(current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     """Return the number of user questions used and remaining quota."""
     try:
         used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
@@ -108,7 +108,7 @@ def user_usage(current_user: User = Depends(get_current_user), db: Session = Dep
 
 
 @app.post("/docs/upload", response_model=UploadResponse)
-async def upload_doc(file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def upload_doc(file: UploadFile = File(...), current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
     content = await file.read()
     doc = ingest_document(db, current_user.id, file.filename, content)
     return UploadResponse(doc_id=doc.id, filename=doc.filename)

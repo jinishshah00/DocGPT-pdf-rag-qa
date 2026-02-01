@@ -1,34 +1,24 @@
+
 import os
 import sys
-import tempfile, uuid
+import uuid
 import html
+import tempfile
+import requests
 import warnings
-import logging
+from dotenv import load_dotenv
+import streamlit as st
 from urllib.parse import quote
 
-import requests
-import streamlit as st
-from dotenv import load_dotenv
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
+
+load_dotenv()
+
+# Optional encrypted cookie manager (may not be installed in all environments)
 try:
     from streamlit_cookies_manager import EncryptedCookieManager
 except Exception:
     EncryptedCookieManager = None
-
-# Env
-os.environ.setdefault("CHROMA_TELEMETRY", "FALSE")
-os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
-os.environ.setdefault("POSTHOG_DISABLED", "1")
-os.environ.setdefault("CHROMA_ENABLE_TELEMETRY", "FALSE")
-
-# Silence telemetry loggers
-logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
-logging.getLogger("chromadb.telemetry.posthog").setLevel(logging.CRITICAL)
-logging.getLogger("posthog").setLevel(logging.CRITICAL)
-
-# Silence legacy LangChain deprecation warnings in logs
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
-
-load_dotenv()
 API_BASE_INTERNAL = os.getenv("API_BASE_INTERNAL", os.getenv("API_BASE", "http://localhost:8000"))
 API_BASE_PUBLIC = os.getenv("API_BASE_PUBLIC", os.getenv("API_BASE", "http://localhost:8000"))
 FRONTEND_BASE = os.getenv("FRONTEND_BASE", "http://localhost:8501")
@@ -409,10 +399,12 @@ def fetch_chat_sessions(token: str | None) -> list[dict]:
 
 
 def fetch_user_usage(token: str | None) -> dict:
-    if not token:
-        return {"used": 0, "limit": 15, "remaining": 15}
+    # Always attempt to query server-side usage. When `token` is provided
+    # include Authorization header; when missing, call unauthenticated so the
+    # backend can map the request to a shared guest user.
+    headers = {"Authorization": f"Bearer {token}"} if token else None
     try:
-        r = requests.get(f"{API_BASE_INTERNAL}/user/usage", headers={"Authorization": f"Bearer {token}"}, timeout=5)
+        r = requests.get(f"{API_BASE_INTERNAL}/user/usage", headers=headers, timeout=5)
         if r.status_code == 401:
             clear_auth_state()
             return {"used": 0, "limit": 15, "remaining": 15}
@@ -503,8 +495,17 @@ def get_pipeline(use_compression: bool, chain_type: str) -> RAGPipeline:
     key = (use_compression, chain_type)
     if key in st.session_state["pipeline_cache"]:
         return st.session_state["pipeline_cache"][key]
-    pipeline = RAGPipeline(use_compression=use_compression, chain_type=chain_type)
+    try:
+        pipeline = RAGPipeline(use_compression=use_compression, chain_type=chain_type)
+    except Exception as e:
+        # Store the error so UI can explain why local pipeline/agent is unavailable
+        st.session_state["pipeline_error"] = str(e)
+        st.session_state["pipeline_cache"][key] = None
+        return None
     st.session_state["pipeline_cache"][key] = pipeline
+    # Clear any prior pipeline_error on success
+    if "pipeline_error" in st.session_state:
+        del st.session_state["pipeline_error"]
     return pipeline
 
 
@@ -934,10 +935,14 @@ with st.sidebar:
     if st.session_state["token"]:
         if not st.session_state["user_email"]:
             st.session_state["user_email"] = fetch_user_email(st.session_state["token"])
-        # Fetch server-side usage/quota for authenticated users
-        usage = fetch_user_usage(st.session_state.get("token")) if st.session_state.get("token") else {"used": 0, "limit": 15, "remaining": 15}
-        st.session_state["message_count"] = usage.get("used", 0)
-        st.session_state["message_limit"] = usage.get("limit", 15)
+        # Fetch server-side usage/quota for authenticated users. Only override
+        # the client-side counters when the server returns explicit values.
+        try:
+            usage = fetch_user_usage(st.session_state.get("token"))
+        except Exception:
+            usage = {}
+        st.session_state["message_count"] = usage.get("used", st.session_state.get("message_count", 0))
+        st.session_state["message_limit"] = usage.get("limit", st.session_state.get("message_limit", 15))
         email = st.session_state["user_email"] or ""
         st.markdown(
             f"""
@@ -976,6 +981,12 @@ with st.sidebar:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Preserve any existing anonymous session counters instead of resetting
+    # them when the user is not logged in. This prevents a logged-in user
+    # from exhausting quota then logging out and resetting the counter.
+    st.session_state.setdefault("message_count", st.session_state.get("message_count", 0))
+    st.session_state.setdefault("message_limit", st.session_state.get("message_limit", 15))
+
 if not st.session_state["token"]:
     # Intentionally do not block anonymous users; show a short note in the sidebar instead.
     pass
@@ -996,56 +1007,74 @@ with st.form("composer_form", clear_on_submit=True):
     # Document upload controls (stick to options section)
     uploaded_file = st.file_uploader("Upload a PDF for analysis", type=["pdf"])
     if uploaded_file is not None:
-        tmp_path = None
-        num_chunks = None
-        # Try to build a local pipeline (may fail if Chroma/DB isn't available).
-        try:
-            pipeline = get_pipeline(use_compression=False, chain_type="stuff")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-            # If pipeline initialized, add PDF to local index
+        # If user has already reached the free usage limit, do not process/upload the PDF.
+        usage = fetch_user_usage(st.session_state.get("token"))
+        used = usage.get("used", st.session_state.get("message_count", 0))
+        limit = usage.get("limit", st.session_state.get("message_limit", 15))
+        if used >= limit:
+            notice = f"You have reached the free usage limit ({used}/{limit}) of questions to DocGPT."
+            msgs = st.session_state.setdefault("messages", [])
+            if not (msgs and msgs[-1].get("kind") == "limit_notice_free" and msgs[-1].get("content") == notice):
+                msgs.append({"role": "assistant", "content": notice, "kind": "limit_notice_free"})
+                st.session_state["messages"] = msgs
+        else:
+            tmp_path = None
+            num_chunks = None
+            # Try to build a local pipeline (may fail if Chroma/DB isn't available).
             try:
-                num_chunks = pipeline.add_pdf(tmp_path, orig_filename=uploaded_file.name)
-            except Exception:
-                num_chunks = None
-        except Exception:
-            # If local pipeline fails (e.g., chroma not initialized), fallback to backend-only flow
-            try:
+                pipeline = get_pipeline(use_compression=False, chain_type="stuff")
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(uploaded_file.read())
                     tmp_path = tmp.name
+                # If pipeline initialized, add PDF to local index
+                try:
+                    num_chunks = pipeline.add_pdf(tmp_path, orig_filename=uploaded_file.name)
+                except Exception:
+                    num_chunks = None
             except Exception:
-                tmp_path = None
-        # Persist document to backend and attach to active session if present
-        # If user is logged in, persist document to backend and attach to active session
-        if st.session_state.get("token"):
+                # If local pipeline fails (e.g., chroma not initialized), fallback to backend-only flow
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
+                except Exception:
+                    tmp_path = None
+            # Persist document to backend and attach to active session if present
+            # Attempt backend upload for both logged-in and anonymous users. When
+            # a token is present, include Authorization header; otherwise call
+            # the endpoint unauthenticated (backend maps to guest user).
             try:
-                headers = {"Authorization": f"Bearer {st.session_state['token']}"}
+                headers = {"Authorization": f"Bearer {st.session_state['token']}"} if st.session_state.get("token") else None
                 with open(tmp_path, "rb") as fh:
-                    r = requests.post(f"{API_BASE_INTERNAL}/docs/upload", headers=headers, files={"file": (uploaded_file.name, fh, "application/pdf")})
+                    if headers:
+                        r = requests.post(f"{API_BASE_INTERNAL}/docs/upload", headers=headers, files={"file": (uploaded_file.name, fh, "application/pdf")})
+                    else:
+                        r = requests.post(f"{API_BASE_INTERNAL}/docs/upload", files={"file": (uploaded_file.name, fh, "application/pdf")})
                 if r.ok:
                     doc_info = r.json()
                     doc_id = doc_info.get("doc_id")
                     # Attach to active session if present
                     sid = st.session_state.get("active_session_id")
-                    if sid and doc_id:
-                        try:
-                            a = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/attach", headers=headers, json={"doc_id": doc_id})
-                        except Exception:
-                            pass
+                    try:
+                        if sid and doc_id:
+                            if headers:
+                                a = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/attach", headers=headers, json={"doc_id": doc_id})
+                            else:
+                                a = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/attach", json={"doc_id": doc_id})
+                    except Exception:
+                        pass
             except Exception:
                 pass
-        shown_uploads = st.session_state.setdefault("upload_notice_shown", set())
-        if uploaded_file.name not in shown_uploads:
-            st.session_state["messages"].append(
-                {
-                    "role": "assistant",
-                    "content": f"File {uploaded_file.name} uploaded. {num_chunks} chunks loaded and indexed.",
-                    "kind": "upload_notice",
-                }
-            )
-            shown_uploads.add(uploaded_file.name)
+            shown_uploads = st.session_state.setdefault("upload_notice_shown", set())
+            if uploaded_file.name not in shown_uploads:
+                st.session_state["messages"].append(
+                    {
+                        "role": "assistant",
+                        "content": f"File {uploaded_file.name} uploaded. {num_chunks} chunks loaded and indexed.",
+                        "kind": "upload_notice",
+                    }
+                )
+                shown_uploads.add(uploaded_file.name)
 
     input_cols = st.columns([0.92, 0.08])
     with input_cols[0]:
@@ -1128,9 +1157,15 @@ else:
             role = msg.get("role", "assistant")
             with st.chat_message(role):
                 content = msg.get("content", "")
-                if msg.get("kind") == "upload_notice":
+                k = msg.get("kind")
+                if k in ("upload_notice", "limit_notice_backend"):
                     st.markdown(
                         f"<div style='color:#1a7f37; font-weight:600;'>{html.escape(content)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                elif k == "limit_notice_free":
+                    st.markdown(
+                        f"<div style='color:#e11d48; font-weight:600;'>{html.escape(content)}</div>",
                         unsafe_allow_html=True,
                     )
                 else:
@@ -1158,40 +1193,64 @@ else:
 
 prompt = (prompt_text or "").strip()
 if send_clicked and prompt:
-    # Enforce client-side cap before attempting a request
-    used_local = st.session_state.get("message_count", 0)
-    limit_local = st.session_state.get("message_limit", 15)
+    # Check server-side usage before attempting a request (works for auth'd and guest users)
+    usage = fetch_user_usage(st.session_state.get("token"))
+    used_local = usage.get("used", st.session_state.get("message_count", 0))
+    limit_local = usage.get("limit", st.session_state.get("message_limit", 15))
     if used_local >= limit_local:
-        st.warning(f"You have reached the free usage limit ({used_local}/{limit_local}) of questions to DocGPT.")
+        notice = f"You have reached the free usage limit ({used_local}/{limit_local}) of questions to DocGPT."
+        msgs = st.session_state.setdefault("messages", [])
+        if not (msgs and msgs[-1].get("kind") == "limit_notice_free" and msgs[-1].get("content") == notice):
+            msgs.append({"role": "assistant", "content": notice, "kind": "limit_notice_free"})
+            st.session_state["messages"] = msgs
     else:
-        # ReAct agent mode runs locally; count as a user question
+        # ReAct agent mode runs locally; require login to prevent quota bypass
         if mode == "ReAct Agent":
-            st.session_state["messages"].append({"role": "user", "content": prompt})
-            st.session_state["message_count"] = st.session_state.get("message_count", 0) + 1
-            pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
-            rag_tool = rag_query_tool(pipeline)
-            web_tool = tavily_search_tool()
-            llm_agent = initialize_agent(
-                tools=[rag_tool, web_tool],
-                llm=pipeline.llm,
-                agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-                agent_kwargs={
-                    "system_message": "Always use RAGSearch for any questions about the uploaded PDF. Use WebSearch only if PDF does not contain the answer."
-                },
-                verbose=True,
-                handle_parsing_errors=True,
-            )
-            agent_response = llm_agent.invoke(prompt)
-            answer_text = agent_response.get("output", "")
-            st.session_state["messages"].append({"role": "assistant", "content": answer_text})
+            if not st.session_state.get("token"):
+                msgs = st.session_state.setdefault("messages", [])
+                err_msg = "ReAct Agent mode requires signing in to prevent quota bypass. Please sign in to use this mode."
+                if not (msgs and msgs[-1].get("content") == err_msg and msgs[-1].get("kind") == "error_notice"):
+                    msgs.append({"role": "assistant", "content": err_msg, "kind": "error_notice"})
+                    st.session_state["messages"] = msgs
+            else:
+                st.session_state["messages"].append({"role": "user", "content": prompt})
+                st.session_state["message_count"] = st.session_state.get("message_count", 0) + 1
+                pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
+                if not pipeline:
+                    # Explain why the local pipeline/agent isn't available
+                    msgs = st.session_state.setdefault("messages", [])
+                    perr = st.session_state.get("pipeline_error") or "local dependencies unavailable"
+                    err_msg = f"ReAct Agent unavailable: {perr}. The agent requires local search/indexing to be running."
+                    if not (msgs and msgs[-1].get("content") == err_msg and msgs[-1].get("kind") == "error_notice"):
+                        msgs.append({"role": "assistant", "content": err_msg, "kind": "error_notice"})
+                        st.session_state["messages"] = msgs
+                else:
+                    rag_tool = rag_query_tool(pipeline)
+                    web_tool = tavily_search_tool()
+                    llm_agent = initialize_agent(
+                        tools=[rag_tool, web_tool],
+                        llm=pipeline.llm,
+                        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+                        agent_kwargs={
+                            "system_message": "Always use RAGSearch for any questions about the uploaded PDF. Use WebSearch only if PDF does not contain the answer."
+                        },
+                        verbose=True,
+                        handle_parsing_errors=True,
+                    )
+                    agent_response = llm_agent.invoke(prompt)
+                    answer_text = agent_response.get("output", "")
+                    st.session_state["messages"].append({"role": "assistant", "content": answer_text})
         else:
             # Non-agent flow: prefer backend persistence for logged-in users
             sid = st.session_state.get("active_session_id")
-            # If logged-in but no active session, try to create one
-            if not sid and st.session_state.get("token"):
+            # Ensure we have a session on the backend (works for both logged-in and guest users)
+            if not sid:
                 try:
-                    headers = {"Authorization": f"Bearer {st.session_state['token']}"}
-                    r = requests.post(f"{API_BASE_INTERNAL}/chat/session", headers=headers, timeout=5)
+                    headers = {"Authorization": f"Bearer {st.session_state['token']}"} if st.session_state.get("token") else None
+                    if headers:
+                        r = requests.post(f"{API_BASE_INTERNAL}/chat/session", headers=headers, timeout=5)
+                    else:
+                        r = requests.post(f"{API_BASE_INTERNAL}/chat/session", timeout=5)
                     if r.ok:
                         sid = r.json().get("session_id")
                         st.session_state["active_session_id"] = sid
@@ -1199,12 +1258,14 @@ if send_clicked and prompt:
                 except Exception:
                     sid = None
 
-            if sid and st.session_state.get("token"):
-                # Persisted backend flow for logged-in users
+            if sid:
                 try:
-                    headers = {"Authorization": f"Bearer {st.session_state['token']}"}
+                    headers = {"Authorization": f"Bearer {st.session_state['token']}"} if st.session_state.get("token") else None
                     payload = {"content": prompt, "chain_type": chain_type, "use_compression": use_compression}
-                    r = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/message", headers=headers, json=payload, timeout=20)
+                    if headers:
+                        r = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/message", headers=headers, json=payload, timeout=20)
+                    else:
+                        r = requests.post(f"{API_BASE_INTERNAL}/chat/{sid}/message", json=payload, timeout=20)
                     if r.ok:
                         data = r.json()
                         ans = data.get("answer") or data.get("result") or ""
@@ -1215,52 +1276,32 @@ if send_clicked and prompt:
                         st.session_state["active_session_is_new"] = False
                         st.session_state["message_count"] = st.session_state.get("message_count", 0) + 1
                     else:
-                        # If backend rejects due to cap, show its message; otherwise fallback to local
                         if r.status_code == 403:
                             try:
                                 detail = r.json().get("detail")
                             except Exception:
                                 detail = "Message limit reached"
-                            st.warning(detail)
+                            st.session_state["messages"].append({"role": "assistant", "content": detail, "kind": "limit_notice_backend"})
                         else:
-                            raise Exception("backend call failed")
+                            # Show a friendly error notice instead of falling back to local processing
+                            err_msg = "Sorry — You might have exceeded the usage limit or an error occurred. Please try again later."
+                            msgs = st.session_state.setdefault("messages", [])
+                            if not (msgs and msgs[-1].get("content") == err_msg and msgs[-1].get("kind") == "error_notice"):
+                                msgs.append({"role": "assistant", "content": err_msg, "kind": "error_notice"})
+                                st.session_state["messages"] = msgs
                 except Exception:
-                    pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
-                    base_response = pipeline.ask(prompt)
-                    answer_text = (
-                        base_response.get("answer")
-                        or base_response.get("result")
-                        or base_response.get("output")
-                        or ""
-                    )
-                    sources = []
-                    for doc_obj in base_response.get("source_documents", []) or []:
-                        sources.append({
-                            "source": doc_obj.metadata.get("source", "?"),
-                            "snippet": doc_obj.page_content[:200].replace(chr(10), " "),
-                        })
-                    st.session_state["messages"].append({"role": "user", "content": prompt})
-                    st.session_state["messages"].append({"role": "assistant", "content": answer_text, "sources": sources})
-                    st.session_state["message_count"] = st.session_state.get("message_count", 0) + 1
+                    err_msg = "Sorry — You might have exceeded the usage limit or an error occurred. Please try again later."
+                    msgs = st.session_state.setdefault("messages", [])
+                    if not (msgs and msgs[-1].get("content") == err_msg and msgs[-1].get("kind") == "error_notice"):
+                        msgs.append({"role": "assistant", "content": err_msg, "kind": "error_notice"})
+                        st.session_state["messages"] = msgs
             else:
-                # Anonymous/local-only flow: keep messages in session_state only
-                pipeline = get_pipeline(use_compression=use_compression, chain_type=chain_type)
-                base_response = pipeline.ask(prompt)
-                answer_text = (
-                    base_response.get("answer")
-                    or base_response.get("result")
-                    or base_response.get("output")
-                    or ""
-                )
-                sources = []
-                for doc_obj in base_response.get("source_documents", []) or []:
-                    sources.append({
-                        "source": doc_obj.metadata.get("source", "?"),
-                        "snippet": doc_obj.page_content[:200].replace(chr(10), " "),
-                    })
-                st.session_state["messages"].append({"role": "user", "content": prompt})
-                st.session_state["messages"].append({"role": "assistant", "content": answer_text, "sources": sources})
-                st.session_state["message_count"] = st.session_state.get("message_count", 0) + 1
+                # Could not create a backend session — show an error message
+                err_msg = "Sorry — could not start a chat session. Please try refreshing the page."
+                msgs = st.session_state.setdefault("messages", [])
+                if not (msgs and msgs[-1].get("content") == err_msg and msgs[-1].get("kind") == "error_notice"):
+                    msgs.append({"role": "assistant", "content": err_msg, "kind": "error_notice"})
+                    st.session_state["messages"] = msgs
 
     st.rerun()
 

@@ -85,8 +85,11 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     # Upsert user
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        # Create with a random hash; password not used for Google login
-        user = User(email=email, password_hash=get_password_hash("oauth-google"))
+        # Create without a password since Google OAuth is used for authentication.
+        # Avoid calling the password hasher here (some runtimes may not have
+        # a compatible bcrypt backend). An empty string indicates no local
+        # password is set.
+        user = User(email=email, password_hash="")
         db.add(user)
         db.commit()
         db.refresh(user)

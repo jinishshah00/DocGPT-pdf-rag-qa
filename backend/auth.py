@@ -16,6 +16,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def get_password_hash(password: str) -> str:
+    # Bcrypt has a 72-byte input limit. Truncate UTF-8 bytes to avoid
+    # backend errors when callers pass long placeholder strings (e.g. from
+    # OAuth flows). Regular user-chosen passwords should remain under this
+    # limit; truncation here is a defensive measure.
+    try:
+        b = password.encode("utf-8")
+    except Exception:
+        b = str(password).encode("utf-8", errors="ignore")
+    if len(b) > 72:
+        b = b[:72]
+        password = b.decode("utf-8", errors="ignore")
     return pwd_context.hash(password)
 
 
