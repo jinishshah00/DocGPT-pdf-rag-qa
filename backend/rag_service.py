@@ -34,7 +34,7 @@ def ingest_document(db: Session, user_id: int, filename: str, content: bytes) ->
 
     # Build index into Chroma
     pipeline = RAGPipeline()
-    pipeline.add_pdf(storage_path, orig_filename=filename)
+    pipeline.add_pdf(storage_path, orig_filename=filename, doc_id=doc.id)
     return doc
 
 
@@ -72,10 +72,10 @@ def answer_question(db: Session, session_id: int, question: str, chain_type: str
     pipeline = _get_pipeline(doc.id, use_compression, chain_type)
     # Make sure document is indexed
     if os.path.exists(doc.storage_path):
-        pipeline.add_pdf(doc.storage_path, orig_filename=doc.filename)
+        pipeline.add_pdf(doc.storage_path, orig_filename=doc.filename, doc_id=doc.id)
 
     start = time.time()
-    response = pipeline.ask(question)
+    response = pipeline.ask(question, doc_id=doc.id)
     latency_ms = int((time.time() - start) * 1000)
 
     # Normalize sources for API response

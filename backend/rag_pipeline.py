@@ -124,7 +124,7 @@ class RAGPipeline:
                 except FileNotFoundError:
                     pass
 
-    def add_pdf(self, pdf_path, orig_filename=None):
+    def add_pdf(self, pdf_path, orig_filename=None, doc_id=None):
         loader = PyMuPDFLoader(pdf_path)
         docs = loader.load()
         # Set metadata to original filename
@@ -137,6 +137,8 @@ class RAGPipeline:
         # Propagate metadata to chunks (if necessary)
         for c in chunks:
             c.metadata["source"] = orig_filename if orig_filename else pdf_path
+            if doc_id is not None:
+                c.metadata["doc_id"] = str(doc_id)
 
         try:
             self.db.add_documents(chunks)
@@ -152,7 +154,18 @@ class RAGPipeline:
                 raise
         return len(chunks)
 
-    def ask(self, query):
+    def ask(self, query, doc_id=None):
+        # Apply per-query metadata filter to scope retrieval to the session's document
+        if doc_id is not None:
+            doc_filter = {"doc_id": str(doc_id)}
+            self.base_retriever.search_kwargs["filter"] = doc_filter
+            if isinstance(self.retriever, ContextualCompressionRetriever):
+                self.retriever.base_retriever.search_kwargs["filter"] = doc_filter
+        else:
+            self.base_retriever.search_kwargs.pop("filter", None)
+            if isinstance(self.retriever, ContextualCompressionRetriever):
+                self.retriever.base_retriever.search_kwargs.pop("filter", None)
+
         # Try invoking QA chain; on DB schema errors, attempt to recreate Chroma and retry once
         try:
             response = self.qa.invoke({"question": query, "chat_history": self.chat_history})

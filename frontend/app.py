@@ -399,12 +399,10 @@ def fetch_chat_sessions(token: str | None) -> list[dict]:
 
 
 def fetch_user_usage(token: str | None) -> dict:
-    # Always attempt to query server-side usage. When `token` is provided
-    # include Authorization header; when missing, call unauthenticated so the
-    # backend can map the request to a shared guest user.
-    headers = {"Authorization": f"Bearer {token}"} if token else None
+    if not token:
+        return {"used": 0, "limit": 15, "remaining": 15}
     try:
-        r = requests.get(f"{API_BASE_INTERNAL}/user/usage", headers=headers, timeout=5)
+        r = requests.get(f"{API_BASE_INTERNAL}/user/usage", headers={"Authorization": f"Bearer {token}"}, timeout=5)
         if r.status_code == 401:
             clear_auth_state()
             return {"used": 0, "limit": 15, "remaining": 15}
@@ -1008,9 +1006,8 @@ with st.form("composer_form", clear_on_submit=True):
     uploaded_file = st.file_uploader("Upload a PDF for analysis", type=["pdf"])
     if uploaded_file is not None:
         # If user has already reached the free usage limit, do not process/upload the PDF.
-        usage = fetch_user_usage(st.session_state.get("token"))
-        used = usage.get("used", st.session_state.get("message_count", 0))
-        limit = usage.get("limit", st.session_state.get("message_limit", 15))
+        used = st.session_state.get("message_count", 0)
+        limit = st.session_state.get("message_limit", 15)
         if used >= limit:
             notice = f"You have reached the free usage limit ({used}/{limit}) of questions to DocGPT."
             msgs = st.session_state.setdefault("messages", [])
@@ -1193,10 +1190,9 @@ else:
 
 prompt = (prompt_text or "").strip()
 if send_clicked and prompt:
-    # Check server-side usage before attempting a request (works for auth'd and guest users)
-    usage = fetch_user_usage(st.session_state.get("token"))
-    used_local = usage.get("used", st.session_state.get("message_count", 0))
-    limit_local = usage.get("limit", st.session_state.get("message_limit", 15))
+    # Enforce client-side cap before attempting a request
+    used_local = st.session_state.get("message_count", 0)
+    limit_local = st.session_state.get("message_limit", 15)
     if used_local >= limit_local:
         notice = f"You have reached the free usage limit ({used_local}/{limit_local}) of questions to DocGPT."
         msgs = st.session_state.setdefault("messages", [])

@@ -12,7 +12,7 @@ from backend.schemas import (
     ChatMessageRequest, ChatMessageResponse,
     FeedbackRequest, EvalRunRequest, EvalRunResponse
 )
-from backend.models import User, Document, ChatSession, Message, Feedback
+from backend.models import User, Document, ChatSession, Message, Feedback, GUEST_EMAIL
 from backend.rag_service import ingest_document, create_session, answer_question, clear_session_messages, delete_session
 from backend.analytics_utils import (
     save_eval_row,
@@ -77,7 +77,7 @@ def get_optional_user(request: Request, db: Session = Depends(get_db)):
             # fall through to guest behavior
             pass
     # Create or return a shared guest user
-    guest_email = "guest@docgpt.local"
+    guest_email = GUEST_EMAIL
     guest = db.query(User).filter(User.email == guest_email).first()
     if not guest:
         try:
@@ -97,12 +97,19 @@ def auth_me(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/user/usage")
-def user_usage(current_user: User = Depends(get_optional_user), db: Session = Depends(get_db)):
-    """Return the number of user questions used and remaining quota."""
-    try:
-        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
-    except Exception:
-        used = 0
+def user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the number of user questions used and remaining quota.
+
+    Logged-in users: read the counter stored directly on the user row.
+    Guest users: fall back to counting messages across all sessions.
+    """
+    if not current_user.is_guest:
+        used = current_user.message_count or 0
+    else:
+        try:
+            used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+        except Exception:
+            used = 0
     LIMIT = 15
     return {"used": used, "limit": LIMIT, "remaining": max(0, LIMIT - used)}
 
@@ -250,11 +257,16 @@ async def send_message(session_id: int, payload: ChatMessageRequest | None = Non
             pass
     if not content:
         raise HTTPException(status_code=422, detail="Missing content")
-    # Enforce per-user message cap (15 questions total across all sessions)
-    try:
-        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
-    except Exception:
-        used = 0
+    # Enforce per-user message cap (15 questions total across all sessions).
+    # Logged-in users: use the counter on the user row.
+    # Guest users: fall back to counting messages in the DB.
+    if not current_user.is_guest:
+        used = current_user.message_count or 0
+    else:
+        try:
+            used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+        except Exception:
+            used = 0
     LIMIT = 15
     if used >= LIMIT:
         raise HTTPException(status_code=403, detail=f"Message limit reached ({used}/{LIMIT}). Upgrade or wait to continue.")
@@ -279,6 +291,11 @@ async def send_message(session_id: int, payload: ChatMessageRequest | None = Non
         "latency_ms": latency_ms,
     }
     log_chat_trace(current_user.id, session_id, content, chain_type, result)
+    # Increment the user-level message counter for authenticated users
+    if not current_user.is_guest:
+        current_user.message_count = (current_user.message_count or 0) + 1
+        db.add(current_user)
+        db.commit()
     return ChatMessageResponse(
         message_id=msg.id,
         answer=msg.content,
@@ -426,11 +443,16 @@ async def agent_invoke_session(session_id: int, query: str = Form(None), request
     sess = db.query(ChatSession).get(session_id)
     if not sess or sess.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Session not found")
-    # Enforce per-user message cap (15 questions total across all sessions)
-    try:
-        used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
-    except Exception:
-        used = 0
+    # Enforce per-user message cap.
+    # Logged-in users: use the counter on the user row.
+    # Guest users: fall back to counting messages in the DB.
+    if not current_user.is_guest:
+        used = current_user.message_count or 0
+    else:
+        try:
+            used = db.query(Message).join(ChatSession, Message.session_id == ChatSession.id).filter(ChatSession.user_id == current_user.id, Message.role == "user").count()
+        except Exception:
+            used = 0
     LIMIT = 15
     if used >= LIMIT:
         raise HTTPException(status_code=403, detail=f"Message limit reached ({used}/{LIMIT}). Upgrade or wait to continue.")
@@ -451,4 +473,9 @@ async def agent_invoke_session(session_id: int, query: str = Form(None), request
     db.add(assistant_msg)
     db.commit()
     db.refresh(assistant_msg)
+    # Increment the user-level message counter for authenticated users
+    if not current_user.is_guest:
+        current_user.message_count = (current_user.message_count or 0) + 1
+        db.add(current_user)
+        db.commit()
     return ChatMessageResponse(message_id=assistant_msg.id, answer=assistant_msg.content, sources=sources, latency_ms=latency_ms)

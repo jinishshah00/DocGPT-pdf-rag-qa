@@ -3,14 +3,22 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 from backend.db import Base
 
+GUEST_EMAIL = "guest@docgpt.local"
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    message_count = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=datetime.utcnow)
     documents = relationship("Document", back_populates="owner")
     sessions = relationship("ChatSession", back_populates="user")
+
+    @property
+    def is_guest(self) -> bool:
+        return self.email == GUEST_EMAIL
 
 class Document(Base):
     __tablename__ = "documents"
