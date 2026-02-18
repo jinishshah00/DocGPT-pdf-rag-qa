@@ -1,189 +1,320 @@
-# DocGPT (RAG PDF QA)
+<div align="center">
 
-DocGPT is a small product-style Retrieval-Augmented Generation (RAG) application that lets you upload PDFs and ask questions with citations, optional web search (ReAct), chunk compression, and quality checks (self-reflection and evaluation). It includes a Streamlit-based frontend and a FastAPI backend with Postgres for persistence and Chroma for vector search.
+# DocGPT
+
+### Intelligent PDF Question-Answering with RAG, Agentic Search & Self-Reflection
+
+Upload any PDF. Ask anything. Get cited, verified answers — powered by retrieval-augmented generation, a ReAct agent with web search fallback, and LLM self-reflection for answer quality.
+
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
+[![LangChain](https://img.shields.io/badge/LangChain-0.1.20-1C3C3C?logo=langchain&logoColor=white)](https://langchain.com)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--3.5--Turbo-412991?logo=openai&logoColor=white)](https://openai.com)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)](https://postgresql.org)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-orange)](https://trychroma.com)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docker.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[**Live Demo**](https://docgpt-pdf-qa-rag.up.railway.app/)
+
+</div>
+
+---
+
+## The Problem
+
+Most LLMs hallucinate when asked about documents they haven't seen. Copy-pasting PDFs into ChatGPT hits token limits, loses page-level sources, and provides no way to verify answer quality. Teams need a system that can **ground every answer in the actual document**, tell you exactly where it found the information, and self-correct when the answer isn't good enough.
+
+**DocGPT** solves this by combining retrieval-augmented generation with per-document scoping, multi-strategy retrieval chains, an agentic fallback to web search, and a built-in self-reflection loop that evaluates and improves answers automatically.
+
+---
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        Streamlit Frontend                        │
+│  Upload PDFs · Chat UI · Chain/Compression/Agent controls        │
+│  Analytics dashboards · Google OAuth / JWT auth flows             │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │  REST API (HTTP)
+┌──────────────────────▼───────────────────────────────────────────┐
+│                        FastAPI Backend                            │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ Auth Layer │  │ RAG Service  │  │ Agent Service (ReAct)    │  │
+│  │ JWT+OAuth  │  │ Ingest/Query │  │ RAGSearch + WebSearch    │  │
+│  └────────────┘  └──────┬───────┘  └────────────┬─────────────┘  │
+│                         │                       │                │
+│  ┌──────────────────────▼───────────────────────▼─────────────┐  │
+│  │                    RAG Pipeline                             │  │
+│  │  PyMuPDF → Chunking → OpenAI Embeddings → ChromaDB         │  │
+│  │  ConversationalRetrievalChain (stuff|map_reduce|refine)     │  │
+│  │  Optional: ContextualCompressionRetriever                   │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────────┐  │
+│  │ Reflection  │  │ Analytics   │  │ Observability            │  │
+│  │ Score+Retry │  │ LLM Eval   │  │ Langfuse Tracing         │  │
+│  └─────────────┘  └─────────────┘  └──────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+        │                    │                    │
+   ┌────▼────┐        ┌─────▼─────┐       ┌─────▼──────┐
+   │PostgreSQL│        │ ChromaDB  │       │ OpenAI API │
+   │ Users,   │        │ Vectors,  │       │ GPT-3.5    │
+   │ Sessions,│        │ Embeddings│       │ Embeddings │
+   │ Messages │        │ (per-doc) │       └────────────┘
+   └──────────┘        └───────────┘
+```
+
+### Data Flow
+
+1. **Upload** — PDF sent to FastAPI → SHA-256 dedup → saved to disk → `Document` row in Postgres
+2. **Index** — PyMuPDF extracts text → `RecursiveCharacterTextSplitter` (1000 chars, 200 overlap) → OpenAI Embeddings → ChromaDB with `doc_id` metadata
+3. **Query** — User message → retriever scoped to session's document via `doc_id` filter → `ConversationalRetrievalChain` with chat history
+4. **Respond** — Answer + source citations + latency metrics → persisted as `Message` → Langfuse trace logged
+5. **Reflect** *(optional)* — LLM scores the answer (1–5), and if below threshold, generates an improved response
 
 ---
 
 ## Features
 
-- Upload PDFs and build a semantic index (local Chroma vector store).
-- Ask questions with sources/citations (RAG): `stuff`, `map_reduce`, `refine` chain strategies.
-- Optional chunk compression (reduces token usage and focuses context).
-- ReAct Agent mode: combines RAG search with external web search tools when the PDF doesn't contain the answer.
-- Conversational memory (chat sessions saved per authenticated user).
-- Anonymous mode: complete, usable session stored only in the browser session (not persisted to the backend or DB).
-- Built-in evaluation and analytic endpoints for saving LLM metrics and evaluation rows.
-- PgAdmin included for DB browsing when running locally with Docker.
+### RAG Pipeline
+- **PDF ingestion** with PyMuPDF extraction and recursive character splitting (1000-char chunks, 200-char overlap)
+- **Three chain strategies** — `stuff` (concatenate context), `map_reduce` (per-chunk reasoning + reduction), `refine` (iterative improvement)
+- **Per-document vector scoping** — ChromaDB metadata filtering ensures queries only retrieve chunks from the session's attached PDF, preventing cross-document leakage
+- **MMR retrieval** (k=5) for diversity-aware document selection
+- **Pipeline caching** by `(doc_id, compression, chain_type)` tuple to avoid redundant initialization
+
+### Chunk Compression
+- Optional `ContextualCompressionRetriever` with `LLMChainExtractor` — compresses retrieved chunks before feeding them to the QA chain
+- Reduces token consumption while preserving relevant information
+
+### ReAct Agent (Agentic RAG)
+- LangChain `ZERO_SHOT_REACT_DESCRIPTION` agent with two tools:
+  - **RAGSearch** — queries the document's vector store (gracefully handles errors so the agent keeps reasoning)
+  - **WebSearch** — Tavily web search for questions beyond the PDF's scope
+- System prompt enforces: *"Always try RAGSearch first; use WebSearch only if the PDF doesn't contain the answer"*
+
+### Self-Reflection & Answer Improvement
+- After generating an answer, the reflection service scores it 1–5 with justification
+- If `retry_needed`, an improved answer is generated automatically at a higher temperature
+- Full trace logged to Langfuse for observability
+
+### Authentication & Authorization
+- **JWT register/login** — email + bcrypt-hashed password → HS256 JWT with configurable expiry
+- **Google OAuth 2.0** — full authorization-code flow with CSRF state parameter
+- **Guest mode** — shared `guest@docgpt.local` account for anonymous demo access
+- **Per-user message quota** — database-tracked `message_count` with server-side enforcement (15 messages)
+- **Document & session ownership** — all operations verify the resource belongs to the requesting user
+
+### Analytics & Evaluation
+- **LLM-as-judge evaluation** — faithfulness checking and multi-metric scoring (faithfulness, relevance, conciseness on a 1–5 scale)
+- **CSV persistence** for evaluation results and LLM metrics
+- **Frontend dashboards** — pie charts (faithful vs. hallucinated), histograms (answer length distribution), metric trend lines, tabular drill-down
+
+### Observability
+- **Langfuse tracing** — captures prompts, completions, token usage, latency, and retrieval decisions
+- Structured logging throughout the backend
+
+### Extras
+- **Conversational memory** — multi-turn chat history passed to the retrieval chain
+- **Auto-generated session titles** — LLM creates a concise 3–8 word title from the document name after the first question
+- **Chroma self-healing** — detects and recovers from corrupted SQLite schemas automatically
+- **Dual-mode frontend** — runs a local RAG pipeline for anonymous sessions AND calls the backend API for authenticated sessions
+- **User feedback** — thumbs up/down ratings with optional notes, stored per-message
 
 ---
 
-## High-level architecture
+## Tech Stack
 
-- Frontend: Streamlit app at `frontend/app.py`. Provides the UI for uploading PDFs, composing queries, configuring options (chain type, compression, self-reflection, ReAct), and viewing chat history and sources.
-- Backend: FastAPI app at `backend/main.py` which exposes endpoints to upload documents, create/load chat sessions, and post chat messages. The backend persists users, documents, sessions, and messages to Postgres via SQLAlchemy.
-- Vector DB: Chroma (file-backed SQLite store) used to persist embeddings; persisted under the Docker volume `backend_chroma` (mapped to `/app/chroma_db` in the backend container).
-- Retrieval / LLM stack: LangChain wrappers using `langchain-openai` and `langchain-chroma`, with `ChatOpenAI` for LLMs (OpenAI API key required). The RAG pipeline is implemented in `backend/rag_pipeline.py` and the query tools for agents in `backend/rag_tools.py`.
-- Authentication: Basic JWT flows + Google OAuth support found under `backend/google_oauth.py` and `backend/auth.py`.
-
----
-
-## Tech stack
-
-```mermaid
-flowchart LR
-	subgraph USER
-		U[User Browser]
-	end
-
-	subgraph FRONTEND
-		FUI["Streamlit UI"]
-		FUP["Uploader"]
-		FCOM["Composer - chain, compression, ReAct"]
-	end
-
-	subgraph BACKEND
-		API["FastAPI REST API"]
-		SESS["Chat Sessions (Postgres)"]
-		DOCS["Documents & Storage"]
-		RAG["RAG Service & Pipeline"]
-	end
-
-	subgraph CHROMA
-		CH["Chroma (vector store)"]
-	end
-
-	subgraph LLMS
-		OPEN["OpenAI API"]
-	end
-
-	subgraph TOOLS
-		TAV["Tavily Web Search"]
-		LF["Langfuse Tracing"]
-		PG["PgAdmin"]
-	end
-
-	U --> FUI
-	FUI --> FUP
-	FUI --> FCOM
-	FUP --> API
-	FCOM --> API
-	API --> RAG
-	RAG --> CH
-	RAG --> OPEN
-	RAG --> TAV
-	API --> SESS
-	SESS --> PG
-	API --> LF
-	FUI --> LF
-```
-DocGPT is a production-oriented Retrieval-Augmented Generation (RAG) system focused on answering questions over PDF documents with citations, quality checks, optional web search, and developer-focused observability. It combines a Streamlit frontend UI with a FastAPI backend, persistent Postgres storage for authenticated users, and Chroma as the vector store for semantic retrieval. The system is designed for both interactive demos (Streamlit) and programmatic use via API.
-
-Key capabilities:
-- PDF ingestion (PyMuPDF) and chunking (RecursiveCharacterTextSplitter)
-- Embeddings via `OpenAIEmbeddings` and vector storage in Chroma
-- Conversational retrieval with LangChain `ConversationalRetrievalChain` supporting chain strategies: `stuff`, `map_reduce`, `refine`
-- Chunk compression via `ContextualCompressionRetriever` to reduce token usage
-- ReAct agent mode: combines RAG search with external web tools (Tavily) and agent orchestration (LangChain agents)
-- Anonymous, local-only sessions (no persistence) and authenticated sessions (persisted in Postgres)
-- Observability/tracing via Langfuse integration
-- Evaluation & analytics endpoints for saving LLM metrics and human eval rows
+| Layer | Technologies |
+|---|---|
+| **Frontend** | Streamlit, Custom CSS, `streamlit-cookies-manager`, Matplotlib, Pandas |
+| **Backend API** | FastAPI, Uvicorn, Pydantic v2 |
+| **AI / LLM** | LangChain 0.1.20, OpenAI GPT-3.5-Turbo, LangChain Agents (ReAct) |
+| **Embeddings** | OpenAI Embeddings via `langchain-openai` |
+| **Vector Store** | ChromaDB (persistent, SQLite-backed), MMR retrieval |
+| **Database** | PostgreSQL 15, SQLAlchemy 2.0 ORM |
+| **Auth** | JWT (python-jose), bcrypt (passlib), Google OAuth 2.0 |
+| **Document Processing** | PyMuPDF, RecursiveCharacterTextSplitter |
+| **Web Search** | Tavily (langchain-community integration) |
+| **Observability** | Langfuse (REST API tracing) |
+| **Deployment** | Docker, Docker Compose, Railway |
 
 ---
 
-## Feature Summary
+## Getting Started
 
-- Document ingestion: upload PDFs, split into chunks, and index into local Chroma (persisted in Docker volume). Metadata (filename, source) is stored with chunks.
-- Retrieval strategies: `stuff` (concat), `map_reduce` (map per chunk + reduce), `refine` (iterative refinement). These are exposed to the user as `Chain type` options.
-- Compression: optional LLM-based chunk compression reduces the size of retrieved context.
-- ReAct + Tools: the ReAct agent can run RAG searches and use Tavily web search as a tool to augment answers when the PDF lacks the information.
-- Sessions: authenticated users get persistent chat sessions (stored in Postgres, viewable via `Your chats`); anonymous users get a full-featured local session that resets on refresh.
-- Tracing & observability: Langfuse integration captures prompts, token usage, latency, and retrieval decisions for debugging and analysis.
-- Analytics: endpoints to capture evaluation rows and LLM metric reports; built-in CSV export/ dashboards in the frontend.
+### Prerequisites
 
----
+- Docker & Docker Compose
+- An [OpenAI API key](https://platform.openai.com/api-keys)
 
-## Full tech stack & keywords (for showcase)
-
-- Languages & Runtimes: Python 3.11, Bash
-- Web / UI: Streamlit, HTML/CSS (embedded), streamlit-components
-- API: FastAPI, Uvicorn
-- Database: PostgreSQL, SQLAlchemy, Alembic (if used), PgAdmin
-- Vector DB / Retrieval: Chroma (langchain-chroma, chromadb), Max Marginal Relevance (MMR)
-- LLM integration: OpenAI (ChatGPT / gpt-3.5 / gpt-4 via openai + langchain-openai)
-- Chains & Agents: LangChain (chains, retrievers, conversational retrieval), langchain-community
-- Tools / Plugins: Tavily web search integration, custom RAG tools
-- Compression & Splitters: RecursiveCharacterTextSplitter, ContextualCompressionRetriever, LLMChainExtractor
-- Observability: Langfuse (tracing), logging
-- Embeddings & Tokenization: OpenAIEmbeddings, tiktoken
-- File handling: PyMuPDF, file upload streams, local storage
-- Auth: JWT (python-jose), Google OAuth integration
-- Utilities: python-dotenv, requests, tenacity (retry), passlib, python-multipart
-- Packaging & Deployment: Docker, Docker Compose, volumes, environment variables
-- Metrics & Analytics: CSV export, analytics dashboards (pandas, matplotlib)
-
----
-
-## Environment variables (comprehensive)
-
-- REQUIRED / CORE
-	- `OPENAI_API_KEY` — OpenAI API key
-	- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
-	- `DATABASE_URL` (optional override)
-	- `JWT_SECRET` — JWT signing secret
-
-- OPTIONAL / INTEGRATIONS
-	- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` — Google OAuth
-	- `TAVILY_API_KEY` — Tavily web search
-	- `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` — Langfuse tracing
-	- `FRONTEND_BASE`, `API_BASE_INTERNAL`, `API_BASE_PUBLIC`
-
----
-
-## How to run (Docker Compose — recommended)
-
-1. Create an `.env` file in the repo root with required variables (example below).
-2. Start the stack:
+### 1. Clone the repository
 
 ```bash
-# from repo root
-docker compose -f infra/docker-compose.yml up --build
+git clone https://github.com/jinishshah00/rag-pdf-qa.git
+cd rag-pdf-qa
 ```
 
-Access:
-- Streamlit UI: `http://localhost:8501`
-- Backend API docs (if enabled): `http://localhost:8000/docs`
-- PgAdmin: `http://localhost:5050` (default `admin@example.com` / `admin`)
+### 2. Create an `.env` file
 
-Notes:
-- The backend persists chat sessions and documents only for authenticated users. Anonymous users use a local pipeline and session state in Streamlit (cleared on refresh).
-- Chroma database files are persisted in the Docker volume `backend_chroma`. If the Chroma sqlite file becomes corrupted (missing tables), the backend contains logic to remove the file and recreate a fresh Chroma DB automatically.
-
-Example `.env` (skeleton):
+Create a `.env` file in the project root:
 
 ```ini
+# ── Required ──────────────────────────────────
+OPENAI_API_KEY=sk-your-key-here
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 POSTGRES_DB=ragqa
-OPENAI_API_KEY=sk-xxxx
-JWT_SECRET=change-me
-# Optional
+JWT_SECRET=your-secret-key
+
+# ── Optional ──────────────────────────────────
+# Google OAuth
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
+
+# Tavily web search (enables ReAct agent web tool)
 TAVILY_API_KEY=...
-LANGFUSE_HOST=...
+
+# Langfuse observability
+LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_PUBLIC_KEY=...
 LANGFUSE_SECRET_KEY=...
 ```
 
+### 3. Start the stack
+
+```bash
+docker compose -f infra/docker-compose.yml up --build
+```
+
+### 4. Access the application
+
+| Service | URL |
+|---|---|
+| **Streamlit UI** | [http://localhost:8501](http://localhost:8501) |
+| **FastAPI Docs** | [http://localhost:8000/docs](http://localhost:8000/docs) |
+| **PgAdmin** | [http://localhost:5050](http://localhost:5050) (login: `admin@example.com` / `admin`) |
+
 ---
 
-## Developer & maintenance notes
+## Project Structure
 
-- `backend/rag_pipeline.py` contains the logic for initializing the Chroma client, retriever, and LangChain `ConversationalRetrievalChain`. It includes recovery paths for broken sqlite schema.
-- `backend/rag_tools.py` exposes a `RAGSearch` tool for LangChain agents — it handles exceptions gracefully so agents don't crash on retrieval failures.
-- `frontend/app.py` contains the Streamlit UI, composer controls (chain type, compression, ReAct), anonymous vs authenticated flows, and the introductory landing card displayed on new sessions.
-- Tests: add integration tests that upload a small PDF, index, and query various chain strategies; consider using a local/mock OpenAI for CI.
+```
+rag-pdf-qa/
+├── backend/
+│   ├── main.py                 # FastAPI app — all REST endpoints
+│   ├── rag_pipeline.py         # Core RAG: Chroma, LangChain chains, retriever
+│   ├── rag_service.py          # Service layer: ingest, query, pipeline caching
+│   ├── rag_tools.py            # LangChain tools for ReAct agent (RAGSearch)
+│   ├── web_tools.py            # Tavily web search tool wrapper
+│   ├── agent_service.py        # ReAct agent orchestration
+│   ├── reflection_service.py   # LLM answer scoring & improvement
+│   ├── self_reflection.py      # Self-reflect-and-retry loop with Langfuse
+│   ├── analytics_utils.py      # LLM-as-judge evaluation & CSV metrics
+│   ├── evaluation.py           # Faithfulness evaluation (frontend path)
+│   ├── auth.py                 # JWT utilities (create/verify tokens)
+│   ├── google_oauth.py         # Google OAuth 2.0 flow
+│   ├── models.py               # SQLAlchemy ORM models (6 tables)
+│   ├── schemas.py              # Pydantic request/response schemas
+│   ├── db.py                   # Database engine & session factory
+│   ├── config.py               # Environment config loader
+│   ├── langfuse_utils.py       # Langfuse REST API tracing
+│   └── observability/
+│       └── langfuse_client.py  # No-op / configurable Langfuse client
+├── frontend/
+│   ├── app.py                  # Streamlit UI (chat, upload, auth, dashboards)
+│   └── analytics.py            # Analytics dashboard rendering
+├── infra/
+│   ├── docker-compose.yml      # 4-service stack (db, backend, frontend, pgadmin)
+│   ├── backend.Dockerfile
+│   ├── frontend.Dockerfile
+│   └── migrations/
+│       ├── 001_init.sql         # Schema: users, documents, sessions, messages, feedback, eval_runs
+│       └── 002_add_user_message_count.sql
+├── .env                        # Environment variables (not committed)
+├── LICENSE
+└── README.md
+```
 
 ---
 
+## Database Schema
 
+```
+┌──────────┐       ┌──────────────┐       ┌─────────────┐
+│  users   │──1:N──│  documents   │──1:N──│chat_sessions │
+│          │       │              │       │              │
+│ id       │       │ id           │       │ id           │
+│ email    │       │ owner_id(FK) │       │ user_id(FK)  │
+│ password │       │ filename     │       │ doc_id(FK)   │
+│ msg_count│       │ file_hash    │       │ title        │
+└──────────┘       │ storage_path │       └──────┬───────┘
+                   └──────────────┘              │
+                                            1:N  │
+                                          ┌──────▼───────┐       ┌──────────┐
+                                          │  messages    │──1:1──│ feedback  │
+                                          │              │       │          │
+                                          │ id           │       │ id       │
+                                          │ session(FK)  │       │ msg(FK)  │
+                                          │ role         │       │ rating   │
+                                          │ content      │       │ note     │
+                                          │ sources_json │       └──────────┘
+                                          │ latency_ms   │
+                                          └──────────────┘
+```
+
+---
+
+## Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| **Per-document Chroma filtering** | Each document's chunks are tagged with a `doc_id` metadata field. Queries filter by `doc_id` so cross-session PDF leakage is impossible — users only get answers from their session's document. |
+| **Pipeline caching by `(doc_id, compression, chain_type)`** | Avoids re-initializing Chroma connections and LangChain chains on every request. Same config → reuse the existing pipeline. |
+| **Graceful RAG tool for agents** | The `RAGSearch` tool catches all exceptions and returns error strings instead of raising. This lets the ReAct agent continue reasoning even if retrieval fails, falling back to web search. |
+| **Dual-mode frontend** | The Streamlit app runs its own local RAG pipeline for anonymous users AND calls the backend API for authenticated sessions. Anonymous users get a full demo experience without requiring sign-up or backend persistence. |
+| **Chroma self-healing** | On startup, the pipeline checks the SQLite schema for expected tables. If corrupted, it deletes and recreates the database automatically — zero manual intervention. |
+| **Database-tracked message quota** | The `message_count` column on the User table is incremented server-side. Logged-in users are checked against the DB counter; guests fall back to server-side session counting. |
+| **LLM-as-judge evaluation** | Two parallel evaluation paths — custom faithfulness checking and multi-metric scoring — provide both binary (faithful/hallucinated) and granular (1–5 scale) quality signals, persisted to CSV for dashboard visualizations. |
+| **SHA-256 file deduplication** | Uploaded PDFs are hashed before storage. Same file uploaded twice → same hash → skip re-indexing. Saves compute and storage. |
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | Yes | OpenAI API key for GPT-3.5-Turbo and embeddings |
+| `POSTGRES_USER` | Yes | PostgreSQL username |
+| `POSTGRES_PASSWORD` | Yes | PostgreSQL password |
+| `POSTGRES_DB` | Yes | PostgreSQL database name |
+| `JWT_SECRET` | Yes | Secret key for JWT signing (HS256) |
+| `DATABASE_URL` | No | Full Postgres connection string (overrides individual PG vars) |
+| `GOOGLE_CLIENT_ID` | No | Google OAuth 2.0 client ID |
+| `GOOGLE_CLIENT_SECRET` | No | Google OAuth 2.0 client secret |
+| `GOOGLE_REDIRECT_URI` | No | Google OAuth callback URL |
+| `TAVILY_API_KEY` | No | Tavily API key (enables web search in ReAct agent) |
+| `LANGFUSE_HOST` | No | Langfuse instance URL |
+| `LANGFUSE_PUBLIC_KEY` | No | Langfuse public key |
+| `LANGFUSE_SECRET_KEY` | No | Langfuse secret key |
+| `FRONTEND_BASE` | No | Frontend URL (for OAuth redirects) |
+| `API_BASE_INTERNAL` | No | Backend URL for service-to-service calls |
+| `API_BASE_PUBLIC` | No | Public-facing backend URL |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+
+Built by [Jinish Shah](mailto:jinishshah00@gmail.com)
+
+</div>
