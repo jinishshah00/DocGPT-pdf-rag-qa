@@ -242,33 +242,6 @@ rag-pdf-qa/
 
 ---
 
-## Database Schema
-
-```
-┌──────────┐       ┌──────────────┐       ┌─────────────┐
-│  users   │──1:N──│  documents   │──1:N──│chat_sessions │
-│          │       │              │       │              │
-│ id       │       │ id           │       │ id           │
-│ email    │       │ owner_id(FK) │       │ user_id(FK)  │
-│ password │       │ filename     │       │ doc_id(FK)   │
-│ msg_count│       │ file_hash    │       │ title        │
-└──────────┘       │ storage_path │       └──────┬───────┘
-                   └──────────────┘              │
-                                            1:N  │
-                                          ┌──────▼───────┐       ┌──────────┐
-                                          │  messages    │──1:1──│ feedback  │
-                                          │              │       │          │
-                                          │ id           │       │ id       │
-                                          │ session(FK)  │       │ msg(FK)  │
-                                          │ role         │       │ rating   │
-                                          │ content      │       │ note     │
-                                          │ sources_json │       └──────────┘
-                                          │ latency_ms   │
-                                          └──────────────┘
-```
-
----
-
 ## Design Decisions
 
 | Decision | Rationale |
